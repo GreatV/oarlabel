@@ -1,0 +1,167 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 20% 97%;
+    --foreground: 222 47% 11%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    --primary: 221 83% 53%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
+
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+
+    --accent: 214 95% 93%;
+    --accent-foreground: 221 83% 40%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 221 83% 53%;
+
+    --sidebar: 0 0% 100%;
+    --sidebar-foreground: 222 47% 11%;
+
+    --canvas: 210 24% 94%;
+    --canvas-foreground: 222 47% 11%;
+
+    --status-success: 151 55% 92%;
+    --status-success-foreground: 152 69% 28%;
+    --status-info: 214 95% 93%;
+    --status-info-foreground: 221 83% 40%;
+    --status-warning: 45 93% 89%;
+    --status-warning-foreground: 32 95% 32%;
+
+    --brand-start: 199 89% 48%;
+    --brand-end: 221 83% 53%;
+
+    --annotation-1: 221 83% 53%;
+    --annotation-2: 262 83% 58%;
+    --annotation-3: 24 95% 53%;
+    --annotation-4: 160 84% 39%;
+    --annotation-5: 0 72% 51%;
+    --annotation-6: 188 86% 38%;
+    --annotation-7: 38 92% 45%;
+    --annotation-8: 330 81% 60%;
+    --annotation-9: 239 84% 67%;
+    --annotation-10: 84 81% 44%;
+
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 222 34% 8%;
+    --foreground: 210 40% 96%;
+
+    --card: 222 30% 11%;
+    --card-foreground: 210 40% 96%;
+
+    --popover: 222 30% 11%;
+    --popover-foreground: 210 40% 96%;
+
+    --primary: 217 91% 60%;
+    --primary-foreground: 222 47% 11%;
+
+    --secondary: 217 24% 17%;
+    --secondary-foreground: 210 40% 96%;
+
+    --muted: 217 24% 17%;
+    --muted-foreground: 215 20% 70%;
+
+    --accent: 217 38% 22%;
+    --accent-foreground: 214 100% 82%;
+
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 217 22% 24%;
+    --input: 217 22% 24%;
+    --ring: 217 91% 68%;
+
+    --sidebar: 222 32% 10%;
+    --sidebar-foreground: 210 40% 96%;
+
+    --canvas: 222 25% 7%;
+    --canvas-foreground: 210 40% 96%;
+
+    --status-success: 156 45% 18%;
+    --status-success-foreground: 152 76% 72%;
+    --status-info: 217 40% 20%;
+    --status-info-foreground: 214 100% 80%;
+    --status-warning: 38 54% 18%;
+    --status-warning-foreground: 45 93% 72%;
+
+    --brand-start: 199 89% 60%;
+    --brand-end: 217 91% 68%;
+
+    --annotation-1: 217 91% 68%;
+    --annotation-2: 262 83% 72%;
+    --annotation-3: 27 96% 66%;
+    --annotation-4: 160 84% 58%;
+    --annotation-5: 0 84% 70%;
+    --annotation-6: 188 86% 58%;
+    --annotation-7: 43 96% 64%;
+    --annotation-8: 330 81% 72%;
+    --annotation-9: 239 84% 78%;
+    --annotation-10: 84 81% 62%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+    user-select: none;
+  }
+}
+
+/* Native window drag region for the custom title bar */
+.drag-region {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* Thin scrollbars for the compact work surface */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.55);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
