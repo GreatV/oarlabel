@@ -5,10 +5,14 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
+  CustomOcrPaths,
   ImageItem,
+  InferenceTuning,
   ModelOptions,
   ModelStatus,
-  PreannBox,
+  PreannResult,
+  TextRecognitionRegionResult,
+  TextRegionInput,
   Mode,
 } from "@/types";
 
@@ -18,6 +22,15 @@ export function fileSrc(path: string): string {
 
 export async function pickDirectory(title: string): Promise<string | null> {
   const res = await open({ directory: true, multiple: false, title });
+  return typeof res === "string" ? res : null;
+}
+
+export async function pickFile(title: string, extensions?: string[]): Promise<string | null> {
+  const res = await open({
+    multiple: false,
+    title,
+    filters: extensions ? [{ name: "File", extensions }] : undefined,
+  });
   return typeof res === "string" ? res : null;
 }
 
@@ -88,25 +101,48 @@ export const api = {
     invoke<void>("save_annotation", { imagePath, data }),
   modelStatus: () => invoke<ModelStatus[]>("model_status"),
   modelOptions: () => invoke<ModelOptions>("model_options"),
-  readModelConfig: () => invoke<string>("read_model_config"),
-  saveModelConfig: (text: string) => invoke<void>("save_model_config", { text }),
+  readCustomOcrPaths: () => invoke<CustomOcrPaths>("read_custom_ocr_paths"),
+  saveCustomOcrPaths: (paths: CustomOcrPaths) =>
+    invoke<void>("save_custom_ocr_paths", { paths }),
   preannotate: (
     imagePath: string,
-    mode: Mode,
+    mode: Mode | "structure",
     ocrModel: string,
     layoutModel: string,
     formulaModel: string,
     tableModel: string,
     device: string,
+    modes?: Mode[],
+    thresholds?: InferenceTuning | null,
   ) =>
-    invoke<PreannBox[]>("preannotate", {
+    invoke<PreannResult>("preannotate", {
       imagePath,
-      mode,
-      ocrModel,
-      layoutModel,
-      formulaModel,
-      tableModel,
-      device,
+      params: {
+        mode,
+        modes: modes ?? [],
+        ocrModel,
+        layoutModel,
+        formulaModel,
+        tableModel,
+        device,
+        thresholds: thresholds ?? null,
+      },
+    }),
+  recognizeTextRegions: (
+    imagePath: string,
+    ocrModel: string,
+    device: string,
+    regions: TextRegionInput[],
+    thresholds?: InferenceTuning | null,
+  ) =>
+    invoke<TextRecognitionRegionResult>("recognize_text_regions", {
+      imagePath,
+      params: {
+        ocrModel,
+        device,
+        regions,
+        thresholds: thresholds ?? null,
+      },
     }),
   exportDataset: (
     images: { path: string; boxes: { points: number[][]; transcription: string }[] }[],

@@ -1,5 +1,6 @@
-import { Loader2 } from "lucide-react";
+import { Loader2, X } from "lucide-react";
 import { modeLabel, t } from "@/i18n";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useStore } from "@/store";
 import { DEVICE_OPTIONS } from "@/types";
@@ -9,6 +10,7 @@ export function StatusBar() {
   const l = s.locale;
   const img = s.currentImage();
   const total = s.images.length;
+  const requestBatchCancel = useStore((st) => st.requestBatchCancel);
   const deviceLabel =
     DEVICE_OPTIONS.find((d) => d.key === s.device)?.label ?? s.device;
   const ocrModelTitle =
@@ -26,6 +28,19 @@ export function StatusBar() {
           <span className="shrink-0 rounded bg-status-warning px-1.5 py-0.5 text-status-warning-foreground">
             {t(l, "common.unsaved")}
           </span>
+        )}
+        {s.batchRunning && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-5 shrink-0 gap-1 px-1.5 text-[11px]"
+            onClick={requestBatchCancel}
+            disabled={s.batchCancelRequested}
+          >
+            <X className="h-3 w-3" />
+            {t(l, "common.cancel")}
+          </Button>
         )}
       </div>
 
@@ -48,7 +63,7 @@ export function StatusBar() {
       <div className="flex min-w-0 justify-end gap-3">
         <span className="shrink-0">
           {t(l, "statusbar.mode")}
-          {modeLabel(l, s.mode)}
+          {s.modes.map((m) => modeLabel(l, m)).join(l === "zh-CN" ? "、" : " · ")}
         </span>
         <span className="truncate" title={ocrModelTitle}>
           {t(l, "statusbar.model")}

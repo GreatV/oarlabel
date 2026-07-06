@@ -91,13 +91,34 @@ pub fn export_recognition(images: &[ExportImage], out_dir: &str) -> Result<Strin
             counter += 1;
             crop.save(crop_dir.join(&name))
                 .map_err(|e| format!("保存裁剪图失败: {e}"))?;
-            gt.push_str(&format!("crop_img/{}\t{}\n", name, text));
+            gt.push_str(&format!("crop_img/{}\t{}\n", name, sanitize_rec_text(text)));
         }
     }
 
     let gt_path = out.join("rec_gt.txt");
     std::fs::write(&gt_path, gt).map_err(|e| e.to_string())?;
     Ok(gt_path.to_string_lossy().to_string())
+}
+
+/// Normalize a recognition transcription for the TSV `rec_gt.txt` format.
+/// Each record must be one tab-separated line, so any control character that
+/// would break line/field splitting (\r, \n, \t, and other C0 controls) is
+/// collapsed to a single space.
+fn sanitize_rec_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = false;
+    for c in s.chars() {
+        if c == '\t' || c == '\r' || c == '\n' || (c.is_control()) {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push(c);
+            prev_space = c == ' ';
+        }
+    }
+    out.trim().to_string()
 }
 
 // ---- geometry helpers -----------------------------------------------------

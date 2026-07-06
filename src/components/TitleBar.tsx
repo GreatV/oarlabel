@@ -2,6 +2,7 @@ import { Minus, Square, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { t } from "@/i18n";
+import { isMac } from "@/lib/platform";
 import { win } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useStore } from "@/store";
@@ -10,30 +11,44 @@ interface TitleBarProps {
   onClose: () => void;
 }
 
-// On macOS the native traffic-light buttons are expected; with `decorations:
-// false` we hide our custom controls there and keep only the drag region.
-const isMac =
-  typeof navigator !== "undefined" &&
-  /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent);
+// macOS uses the native traffic-light buttons (enabled via
+// tauri.macos.conf.json: decorations:true + titleBarStyle:"Overlay"); we hide
+// our custom controls there and only keep the drag region, reserving room on
+// the left so the title never sits under the traffic lights. Windows/Linux keep
+// the frameless window (decorations:false) and our custom min/max/close buttons.
 
 // Shared look for the frameless window controls: flat, square, muted text with a
 // consistent hover background. The close button overrides the hover color.
 const windowBtn =
-  "h-9 w-11 rounded-none text-muted-foreground hover:bg-foreground/10 hover:text-foreground";
+  "h-7 w-11 rounded-none text-muted-foreground hover:bg-foreground/10 hover:text-foreground";
 
 export function TitleBar({ onClose }: TitleBarProps) {
   const locale = useStore((s) => s.locale);
 
   return (
-    <div className="drag-region flex h-9 items-center justify-between border-b bg-card pl-3 pr-0">
-      <div className="flex items-center gap-2">
-        <div className="flex h-5 w-5 items-center justify-center rounded-full bg-gradient-to-br from-[hsl(var(--brand-start))] to-[hsl(var(--brand-end))]">
-          <div className="h-2 w-2 rounded-full bg-white/90" />
+    <div
+      // Tauri 2 uses the `data-tauri-drag-region` attribute (not CSS
+      // -webkit-app-region) to make regions draggable. The whole bar is a
+      // drag region; interactive controls inside opt out automatically (the
+      // drag script skips buttons/links/role=button).
+      data-tauri-drag-region
+      className={cn(
+        "flex h-7 items-center justify-between border-b bg-card",
+        isMac ? "px-0" : "pl-3 pr-0",
+      )}
+    >
+      {!isMac && (
+        <div className="flex items-center gap-1.5">
+          <div className="flex h-4 w-4 items-center justify-center rounded-full bg-gradient-to-br from-[hsl(var(--brand-start))] to-[hsl(var(--brand-end))]">
+            <div className="h-1.5 w-1.5 rounded-full bg-white/90" />
+          </div>
+          <span className="text-xs font-semibold tracking-tight text-foreground">oarlabel</span>
         </div>
-        <span className="text-sm font-semibold tracking-tight text-foreground">oarlabel</span>
-      </div>
-      {/* Reserve the drag region even when controls are hidden (macOS). */}
-      <div className={cn("no-drag flex items-center", isMac && "pointer-events-none invisible w-px")}>
+      )}
+      {/* On macOS the native traffic lights own the left; no brand block.
+          On Windows/Linux we render the frameless min/max/close buttons. */}
+      {!isMac && (
+      <div className="flex items-center">
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -77,6 +92,7 @@ export function TitleBar({ onClose }: TitleBarProps) {
           <TooltipContent side="bottom">{t(locale, "common.close")}</TooltipContent>
         </Tooltip>
       </div>
+      )}
     </div>
   );
 }

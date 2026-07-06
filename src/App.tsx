@@ -13,7 +13,10 @@ import { ShortcutsDialog } from "@/components/dialogs/ShortcutsDialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { t } from "@/i18n";
 import { useShortcuts } from "@/hooks/useShortcuts";
+import { useNativeMenu } from "@/hooks/useNativeMenu";
+import { useTheme } from "@/hooks/useTheme";
 import { confirmDiscardChanges, pickDirectory, win } from "@/lib/tauri";
+import { isMac } from "@/lib/platform";
 import { useStore } from "@/store";
 
 const TOOLBAR_DOCK_KEY = "oarlabel.toolbarDock";
@@ -40,6 +43,7 @@ function App() {
   const view = useStore((s) => s.view);
   const locale = useStore((s) => s.locale);
   useShortcuts();
+  useTheme();
 
   const handleOpen = async () => {
     try {
@@ -54,6 +58,16 @@ function App() {
   const handleClose = async () => {
     await win.close();
   };
+
+  // On macOS the native global menu (built in Rust) replaces the in-window
+  // MenuBar; this hook routes its events to the store and these dialogs.
+  useNativeMenu({
+    openFolder: handleOpen,
+    openExport: () => setExportOpen(true),
+    openSettings: () => setSettingsOpen(true),
+    openShortcuts: () => setShortcutsOpen(true),
+    openAbout: () => setAboutOpen(true),
+  });
 
   const changeToolbarDock = (dock: ToolbarDock) => {
     localStorage.setItem(TOOLBAR_DOCK_KEY, dock);
@@ -103,14 +117,17 @@ function App() {
     <div className="flex h-screen flex-col overflow-hidden bg-background">
       <TooltipProvider delayDuration={400}>
         <TitleBar onClose={handleClose} />
-        <MenuBar
-          onOpen={handleOpen}
-          onExport={() => setExportOpen(true)}
-          onSettings={() => setSettingsOpen(true)}
-          onShortcuts={() => setShortcutsOpen(true)}
-          onAbout={() => setAboutOpen(true)}
-          onClose={handleClose}
-        />
+        {/* On macOS the native global menu replaces this in-window menubar. */}
+        {!isMac && (
+          <MenuBar
+            onOpen={handleOpen}
+            onExport={() => setExportOpen(true)}
+            onSettings={() => setSettingsOpen(true)}
+            onShortcuts={() => setShortcutsOpen(true)}
+            onAbout={() => setAboutOpen(true)}
+            onClose={handleClose}
+          />
+        )}
         {view.toolbar && toolbarDock === "top" && (
           <Toolbar
             dock={toolbarDock}

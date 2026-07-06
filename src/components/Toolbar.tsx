@@ -8,14 +8,13 @@ import {
   Hexagon,
   LayoutTemplate,
   ListOrdered,
-  Pencil,
+  MousePointer2,
   Save,
   ScanText,
   Sigma,
   Sparkles,
   SquareDashed,
   Table2,
-  Trash2,
   Upload,
 } from "lucide-react";
 import { useEffect, useState, type PointerEvent as ReactPointerEvent } from "react";
@@ -47,10 +46,9 @@ const MODES: { key: Mode; icon: React.ReactNode }[] = [
 ];
 
 const TOOLS: { key: Tool; labelKey: MessageKey; icon: React.ReactNode }[] = [
+  { key: "select", labelKey: "toolbar.edit", icon: <MousePointer2 className="h-4 w-4" /> },
   { key: "rect", labelKey: "toolbar.rect", icon: <SquareDashed className="h-4 w-4" /> },
   { key: "polygon", labelKey: "toolbar.polygon", icon: <Hexagon className="h-4 w-4" /> },
-  { key: "edit", labelKey: "toolbar.edit", icon: <Pencil className="h-4 w-4" /> },
-  { key: "delete", labelKey: "toolbar.delete", icon: <Trash2 className="h-4 w-4" /> },
 ];
 
 /** Tooltip side relative to the docked toolbar: vertical bars flank the canvas,
@@ -222,20 +220,45 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
         </span>
 
         <ToggleGroup
-          type="single"
+          type="multiple"
           orientation={vertical ? "vertical" : "horizontal"}
-          value={s.mode}
-          onValueChange={(v) => v && s.setMode(v as Mode)}
+          value={s.modes}
+          // Radix "multiple" emits the full new set on each toggle; find the
+          // single added/removed member and delegate to toggleMode so recency
+          // (append = new primary) and the min-one-active rule stay in the store.
+          onValueChange={(next) => {
+            const cur = s.modes;
+            const added = next.find((m) => !cur.includes(m as Mode));
+            if (added) {
+              s.toggleMode(added as Mode);
+              return;
+            }
+            const removed = cur.find((m) => !next.includes(m));
+            if (removed) s.toggleMode(removed);
+          }}
           className={cn(vertical && "w-full flex-col")}
         >
-          {MODES.map((m) => (
-            <Tip key={m.key} label={modeLabel(l, m.key)} side={side}>
-              <ToggleGroupItem value={m.key} className={cn("px-2", vertical && "w-full")}>
-                {m.icon}
-                <span className={labelCls}>{modeLabel(l, m.key)}</span>
-              </ToggleGroupItem>
-            </Tip>
-          ))}
+          {MODES.map((m) => {
+            const active = s.modes.includes(m.key);
+            return (
+              <Tip key={m.key} label={modeLabel(l, m.key)} side={side}>
+                <ToggleGroupItem
+                  value={m.key}
+                  aria-pressed={active}
+                  // `data-active` is an explicit, self-controlled flag (not the
+                  // Radix-managed data-state). Styled in index.css so it wins the
+                  // cascade over the toggle's data-[state=off] classes — which is
+                  // needed because Radix's data-state can fail to propagate when
+                  // the tooltip trigger clones this item.
+                  data-active={active ? "true" : undefined}
+                  className={cn("px-2", vertical && "w-full")}
+                >
+                  {m.icon}
+                  <span className={labelCls}>{modeLabel(l, m.key)}</span>
+                </ToggleGroupItem>
+              </Tip>
+            );
+          })}
         </ToggleGroup>
 
         <Separator orientation={vertical ? "horizontal" : "vertical"} className={cn(vertical ? "my-1" : "mx-2 h-7")} />
@@ -277,7 +300,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
             <Separator orientation="horizontal" className="my-1" />
             <Tip label={t(l, "toolbar.preannotateAll")} side={side}>
               <Button
-                variant="default"
+                variant="ghost"
                 size="sm"
                 className="h-9 w-full gap-1.5"
                 onClick={() => s.preannotateAll()}
@@ -327,7 +350,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
           <Separator orientation="vertical" className="mx-2 h-7" />
           <Tip label={t(l, "toolbar.preannotateAll")} side={side}>
             <Button
-              variant="default"
+              variant="ghost"
               size="sm"
               className="h-9 gap-1.5"
               onClick={() => s.preannotateAll()}
@@ -386,19 +409,32 @@ function ToolGroup({ vertical, side }: { vertical: boolean; side: "top" | "botto
     <ToggleGroup
       type="single"
       orientation={vertical ? "vertical" : "horizontal"}
-      value={s.tool === "select" ? "" : s.tool}
-      onValueChange={(v) => s.setTool((v || "select") as Tool)}
+      value={s.tool}
+      onValueChange={(v) => {
+        if (v) s.setTool(v as Tool);
+      }}
       disabled={!hasImage}
       className={cn(vertical && "w-full flex-col")}
     >
-      {TOOLS.map((tool) => (
-        <Tip key={tool.key} label={t(l, tool.labelKey)} side={side}>
-          <ToggleGroupItem value={tool.key} className={cn("px-2", vertical && "w-full")}>
-            {tool.icon}
-            <span className={labelCls}>{t(l, tool.labelKey)}</span>
-          </ToggleGroupItem>
-        </Tip>
-      ))}
+      {TOOLS.map((tool) => {
+        const active = s.tool === tool.key;
+        return (
+          <Tip key={tool.key} label={t(l, tool.labelKey)} side={side}>
+            <ToggleGroupItem
+              value={tool.key}
+              aria-pressed={active}
+              // Explicit active flag (same approach as the mode items): Radix's
+              // data-state can fail to propagate under the Tooltip asChild clone,
+              // so we drive the highlight ourselves from the real `s.tool`.
+              data-active={active ? "true" : undefined}
+              className={cn("px-2", vertical && "w-full")}
+            >
+              {tool.icon}
+              <span className={labelCls}>{t(l, tool.labelKey)}</span>
+            </ToggleGroupItem>
+          </Tip>
+        );
+      })}
     </ToggleGroup>
   );
 }

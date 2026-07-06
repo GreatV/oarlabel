@@ -47,15 +47,18 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
 
   const run = async () => {
     if (!outDir) return;
-    const payload = await useStore.getState().exportableImages();
-
-    if (payload.length === 0) {
-      useStore.setState({ statusMsg: t(locale, "export.noAnnotations") });
-      return;
-    }
-
     setBusy(true);
     try {
+      // Reading annotations across all images can throw (corrupt/missing
+      // JSON); keep it inside the try so the error surfaces instead of
+      // becoming an unhandled rejection with no UI feedback.
+      const payload = await useStore.getState().exportableImages();
+
+      if (payload.length === 0) {
+        useStore.setState({ statusMsg: t(locale, "export.noAnnotations") });
+        return;
+      }
+
       const out = await api.exportDataset(payload, outDir, kind);
       useStore.setState({ statusMsg: tt(locale, "export.done", { path: out }) });
       onOpenChange(false);

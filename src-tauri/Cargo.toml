@@ -1,8 +1,10 @@
 [package]
 name = "oarlabel"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Desktop OCR / layout annotation tool built with Tauri + oar-ocr"
+authors = ["Wang Xin"]
+license = "MIT"
+repository = "https://github.com/GreatV/oarlabel"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -30,13 +32,14 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # OCR / image processing
-oar-ocr = { version = "0.7.1", features = ["auto-download"] }
+oar-ocr = { version = "0.7.2", features = ["auto-download"] }
 image = "0.25"
 
 # PDF rendering (pure Rust) for "import PDF"
 hayro = "0.5"
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
 walkdir = "2"

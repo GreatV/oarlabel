@@ -7,6 +7,7 @@ export interface Shortcut {
 
 export const SHORTCUTS: Shortcut[] = [
   { keys: "Ctrl+S", descKey: "shortcuts.save" },
+  { keys: "Ctrl+Enter", descKey: "shortcuts.saveAndNext" },
   { keys: "Ctrl+Z", descKey: "shortcuts.undo" },
   { keys: "Ctrl+Shift+Z", descKey: "shortcuts.redo" },
   { keys: "Ctrl+C", descKey: "shortcuts.copy" },
@@ -21,6 +22,5 @@ export const SHORTCUTS: Shortcut[] = [
   { keys: "F11", descKey: "shortcuts.fullscreen" },
   { keys: "R", descKey: "shortcuts.rect" },
   { keys: "P", descKey: "shortcuts.polygon" },
-  { keys: "E", descKey: "shortcuts.edit" },
   { keys: "Enter", descKey: "shortcuts.polygon" },
 ];

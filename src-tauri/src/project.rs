@@ -74,22 +74,96 @@ pub fn image_size(path: &str) -> Result<(u32, u32), String> {
     image::image_dimensions(path).map_err(|e| format!("Failed to read image dimensions: {e}"))
 }
 
+/// Resolve a unique annotation sidecar path for `image_path`.
+///
+/// The sidecar keeps the full filename so images that differ only by
+/// extension (e.g. `a.jpg` vs `a.png`) don't share one annotation file:
+/// `a.jpg` → `a.jpg.json`, `a.png` → `a.png.json`. (Previously we used
+/// `with_extension("json")`, which collapsed both to `a.json` and silently
+/// overwrote.)
 fn annotation_path(image_path: &str) -> Result<std::path::PathBuf, String> {
     let p = Path::new(image_path);
     if !p.is_file() {
         return Err(format!("Image file does not exist: {image_path}"));
     }
-    Ok(p.with_extension("json"))
+    let name = p
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| format!("Invalid image path: {image_path}"))?;
+    Ok(p.with_file_name(format!("{name}.json")))
+}
+
+/// The pre-collision layout (`a.jpg` → `a.json`), used only as a read
+/// fallback so existing workspaces still load. Saves always go to the new
+/// full-name sidecar, so loading migrates incrementally.
+///
+/// Only return a legacy path when it is UNAMBIGUOUS: if a sibling image in the
+/// same directory shares the same stem with a different extension (e.g.
+/// `a.jpg` and `a.png`), both would map to the same legacy `a.json` and we
+/// can't tell which one it belonged to — so skip the fallback (return None,
+/// treated as no annotation) rather than risk loading the wrong image's data.
+fn legacy_annotation_path(image_path: &str) -> Option<std::path::PathBuf> {
+    let p = Path::new(image_path);
+    let stem = p.file_stem()?.to_str()?.to_string();
+    let parent = p.parent()?;
+    let my_ext = p
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+
+    // Walk the parent dir once; if any other image shares this stem with a
+    // different extension, the legacy file is ambiguous and must be ignored.
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let ep = entry.path();
+            if ep == p {
+                continue;
+            }
+            if !is_image(&ep) {
+                continue;
+            }
+            let same_stem = ep
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s == stem)
+                .unwrap_or(false);
+            if !same_stem {
+                continue;
+            }
+            let other_ext = ep
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_lowercase())
+                .unwrap_or_default();
+            if other_ext != my_ext {
+                return None; // ambiguous: a.jpg and a.png both → a.json
+            }
+        }
+    }
+
+    Some(p.with_file_name(format!("{stem}.json")))
 }
 
 pub fn read_annotation(image_path: &str) -> Result<Option<String>, String> {
     let p = annotation_path(image_path)?;
-    if !p.is_file() {
-        return Ok(None);
+    if p.is_file() {
+        return std::fs::read_to_string(&p)
+            .map(Some)
+            .map_err(|e| e.to_string());
     }
-    std::fs::read_to_string(&p)
-        .map(Some)
-        .map_err(|e| e.to_string())
+    // Migrate-on-read: an old-style `a.json` (without the extension) still
+    // belongs to this image, so fall back to it — but only when unambiguous.
+    // legacy_annotation_path returns None if a sibling image (e.g. `a.png`)
+    // shares the same stem, since the legacy file can't be safely attributed.
+    if let Some(legacy) = legacy_annotation_path(image_path) {
+        if legacy.is_file() {
+            return std::fs::read_to_string(&legacy)
+                .map(Some)
+                .map_err(|e| e.to_string());
+        }
+    }
+    Ok(None)
 }
 
 pub fn save_annotation(image_path: &str, data: &str) -> Result<(), String> {

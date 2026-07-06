@@ -140,16 +140,6 @@
   }
 }
 
-/* Native window drag region for the custom title bar */
-.drag-region {
-  -webkit-app-region: drag;
-  app-region: drag;
-}
-.no-drag {
-  -webkit-app-region: no-drag;
-  app-region: no-drag;
-}
-
 /* Thin scrollbars for the compact work surface */
 ::-webkit-scrollbar {
   width: 8px;
@@ -164,4 +154,20 @@
 }
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* Explicit selected state for the mode toggle items. Uses a self-controlled
+   `data-active` flag rather than Radix's data-state, which can fail to
+   propagate when the tooltip trigger clones the toggle item. The selector has
+   higher specificity than the toggle variant's data-[state=off] classes, so the
+   selected mode is always clearly highlighted. Uses the same solid primary
+   fill as `Button variant="default"` (the main-action buttons like "batch
+   pre-annotate") so selected items read at the same visual weight. */
+button[data-active="true"] {
+  border-color: hsl(var(--primary));
+  background-color: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+}
+button[data-active="true"]:hover {
+  background-color: hsl(var(--primary) / 0.9);
 }

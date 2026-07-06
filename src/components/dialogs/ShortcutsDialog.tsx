@@ -6,6 +6,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { t } from "@/i18n";
+import { shortcut } from "@/lib/platform";
 import { SHORTCUTS } from "@/lib/shortcuts";
 import { useStore } from "@/store";
 
@@ -32,7 +33,7 @@ export function ShortcutsDialog({ open, onOpenChange }: ShortcutsDialogProps) {
                 <dt className="text-sm text-foreground/80">{t(locale, s.descKey)}</dt>
                 <dd>
                   <kbd className="rounded border bg-secondary px-2 py-0.5 text-xs font-medium text-muted-foreground">
-                    {s.keys}
+                    {shortcut(s.keys)}
                   </kbd>
                 </dd>
               </div>

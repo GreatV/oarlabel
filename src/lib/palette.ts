@@ -64,9 +64,6 @@ function resolveHsl(raw: string): RGB {
 }
 
 function readPalette(): string[] {
-  if (typeof document === "undefined") {
-    return KEYS.map(() => "#000000");
-  }
   const root = document.documentElement;
   const theme = root.classList.contains("dark") ? "dark" : "light";
   if (cachedPalette && cachedTheme === theme) return cachedPalette;
@@ -89,18 +86,11 @@ export function colorFor(index: number): string {
   return p[index % p.length];
 }
 
-/** Parse "#RRGGBB" / rgb() into {r,g,b} for building alpha variants. */
+/** Parse an rgb()/rgba() string into {r,g,b} for building alpha variants.
+ *  Inputs always come from readPalette(), which formats them as "rgb(r, g, b)". */
 function toRGB(color: string): RGB {
-  const hex = color.match(/^#([0-9a-f]{6})$/i);
-  if (hex) {
-    const n = parseInt(hex[1], 16);
-    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
-  }
-  const rgb = color.match(/rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i);
-  if (rgb) {
-    return { r: Number(rgb[1]), g: Number(rgb[2]), b: Number(rgb[3]) };
-  }
-  return { r: 0, g: 0, b: 0 };
+  const rgb = color.match(/rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i)!;
+  return { r: Number(rgb[1]), g: Number(rgb[2]), b: Number(rgb[3]) };
 }
 
 /** rgba(...) with the given alpha — safe to pass directly to Konva. */

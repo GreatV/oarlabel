@@ -14,10 +14,7 @@ use crate::project::ImageItem;
 
 const PDF_IMPORT_CACHE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-fn render_pages(
-    pdf_path: &str,
-    max_size: Option<(u32, u32)>,
-) -> Result<Vec<image::RgbImage>, String> {
+fn render_pages(pdf_path: &str) -> Result<Vec<image::RgbImage>, String> {
     use hayro::RenderSettings;
 
     let data = std::fs::read(pdf_path).map_err(|e| format!("读取 PDF 失败: {e}"))?;
@@ -35,10 +32,10 @@ fn render_pages(
             return Err(format!("无效的页面尺寸: {width}x{height}"));
         }
 
-        let scale = match max_size {
-            Some((mw, mh)) => (mw as f32 / width).min(mh as f32 / height).min(3.0),
-            None => 2.0,
-        };
+        // Fixed 2x render scale. (There used to be a max_size parameter for
+        // downscaling large pages, but it was always passed None, so it has been
+        // removed to avoid carrying dead configuration.)
+        let scale = 2.0;
 
         let settings = RenderSettings {
             x_scale: scale,
@@ -120,7 +117,7 @@ pub fn import_pdf(
     };
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建输出目录失败: {e}"))?;
 
-    let pages = render_pages(pdf_path, None)?;
+    let pages = render_pages(pdf_path)?;
     if pages.is_empty() {
         return Err("PDF 没有可渲染的页面".into());
     }

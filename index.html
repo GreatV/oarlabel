@@ -5,6 +5,23 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Tauri + React + Typescript</title>
+    <!-- Apply the saved theme before first paint to avoid a flash of the wrong
+         theme. Mirrors src/hooks/useTheme.ts: reads the same localStorage key
+         (stored JSON-stringified by saveLS), expands "system" via the OS
+         prefers-color-scheme, and toggles .dark on <html>. -->
+    <script>
+      (function () {
+        try {
+          var raw = localStorage.getItem("oarlabel.theme");
+          var theme = raw ? JSON.parse(raw) : "system";
+          var dark =
+            theme === "dark" ||
+            (theme === "system" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (dark) document.documentElement.classList.add("dark");
+        } catch (e) {}
+      })();
+    </script>
   </head>
 
   <body>

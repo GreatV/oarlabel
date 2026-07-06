@@ -24,6 +24,7 @@ import {
   Sigma,
   SlidersHorizontal,
   Sparkles,
+  SunMoon,
   Table2,
   Trash2,
   Undo2,
@@ -34,9 +35,10 @@ import {
 } from "lucide-react";
 import { LOCALE_OPTIONS, t } from "@/i18n";
 import { LINKS } from "@/lib/links";
+import { shortcut } from "@/lib/platform";
 import { openExternal, pickImages, pickPdf, win } from "@/lib/tauri";
 import { useStore } from "@/store";
-import { DEVICE_OPTIONS, type Device } from "@/types";
+import { DEVICE_OPTIONS, THEME_OPTIONS, type Device, type Theme } from "@/types";
 import {
   Menubar,
   MenubarCheckboxItem,
@@ -134,7 +136,11 @@ export function MenuBar({
           <MenubarItem onClick={() => s.save()} disabled={!hasImage}>
             <Save className={ico} />
             {t(l, "menu.file.save")}
-            <MenubarShortcut>Ctrl+S</MenubarShortcut>
+            <MenubarShortcut>{shortcut("Ctrl+S")}</MenubarShortcut>
+          </MenubarItem>
+          <MenubarItem onClick={() => void s.saveAndNext()} disabled={!hasImage}>
+            {t(l, "menu.file.saveAndNext")}
+            <MenubarShortcut>{shortcut("Ctrl+Enter")}</MenubarShortcut>
           </MenubarItem>
           <MenubarItem onClick={onExport} disabled={!s.images.length}>
             <Upload className={ico} />
@@ -154,18 +160,18 @@ export function MenuBar({
           <MenubarItem onClick={() => s.undo()}>
             <Undo2 className={ico} />
             {t(l, "menu.edit.undo")}
-            <MenubarShortcut>Ctrl+Z</MenubarShortcut>
+            <MenubarShortcut>{shortcut("Ctrl+Z")}</MenubarShortcut>
           </MenubarItem>
           <MenubarItem onClick={() => s.redo()}>
             <Redo2 className={ico} />
             {t(l, "menu.edit.redo")}
-            <MenubarShortcut>Ctrl+Shift+Z</MenubarShortcut>
+            <MenubarShortcut>{shortcut("Ctrl+Shift+Z")}</MenubarShortcut>
           </MenubarItem>
           <MenubarSeparator />
           <MenubarItem onClick={() => s.copySelection()} disabled={!hasSelection}>
             <Copy className={ico} />
             {t(l, "menu.edit.copy")}
-            <MenubarShortcut>Ctrl+C</MenubarShortcut>
+            <MenubarShortcut>{shortcut("Ctrl+C")}</MenubarShortcut>
           </MenubarItem>
           <MenubarItem
             onClick={() => s.paste()}
@@ -173,13 +179,13 @@ export function MenuBar({
           >
             <ClipboardPaste className={ico} />
             {t(l, "menu.edit.paste")}
-            <MenubarShortcut>Ctrl+V</MenubarShortcut>
+            <MenubarShortcut>{shortcut("Ctrl+V")}</MenubarShortcut>
           </MenubarItem>
           <MenubarSeparator />
           <MenubarItem onClick={() => s.selectAll()} disabled={!hasImage}>
             <CheckSquare className={ico} />
             {t(l, "menu.edit.selectAll")}
-            <MenubarShortcut>Ctrl+A</MenubarShortcut>
+            <MenubarShortcut>{shortcut("Ctrl+A")}</MenubarShortcut>
           </MenubarItem>
           <MenubarItem onClick={() => s.clearSelection()} disabled={!hasSelection}>
             <XSquare className={ico} />
@@ -200,16 +206,16 @@ export function MenuBar({
           <MenubarItem onClick={() => s.setZoom(s.zoom * 1.2)} disabled={!hasImage}>
             <ZoomIn className={ico} />
             {t(l, "menu.view.zoomIn")}
-            <MenubarShortcut>Ctrl+=</MenubarShortcut>
+            <MenubarShortcut>{shortcut("Ctrl+=")}</MenubarShortcut>
           </MenubarItem>
           <MenubarItem onClick={() => s.setZoom(s.zoom / 1.2)} disabled={!hasImage}>
             <ZoomOut className={ico} />
             {t(l, "menu.view.zoomOut")}
-            <MenubarShortcut>Ctrl+-</MenubarShortcut>
+            <MenubarShortcut>{shortcut("Ctrl+-")}</MenubarShortcut>
           </MenubarItem>
           <MenubarItem onClick={() => s.requestFit("actual")} disabled={!hasImage}>
             {t(l, "menu.view.actual")}
-            <MenubarShortcut>Ctrl+0</MenubarShortcut>
+            <MenubarShortcut>{shortcut("Ctrl+0")}</MenubarShortcut>
           </MenubarItem>
           <MenubarItem onClick={() => s.requestFit("window")} disabled={!hasImage}>
             {t(l, "menu.view.fitWindow")}
@@ -244,6 +250,23 @@ export function MenuBar({
           <MenubarCheckboxItem checked={s.view.highlight} onCheckedChange={() => s.toggleView("highlight")}>
             {t(l, "menu.view.highlight")}
           </MenubarCheckboxItem>
+
+          <MenubarSeparator />
+          <MenubarSub>
+            <MenubarSubTrigger>
+              <SunMoon className={ico} />
+              {t(l, "menu.view.theme")}
+            </MenubarSubTrigger>
+            <MenubarSubContent>
+              <MenubarRadioGroup value={s.theme} onValueChange={(v) => s.setTheme(v as Theme)}>
+                {THEME_OPTIONS.map((o) => (
+                  <MenubarRadioItem key={o.key} value={o.key}>
+                    {t(l, o.labelKey)}
+                  </MenubarRadioItem>
+                ))}
+              </MenubarRadioGroup>
+            </MenubarSubContent>
+          </MenubarSub>
 
           <MenubarSeparator />
           <MenubarItem onClick={() => win.toggleFullscreen()}>

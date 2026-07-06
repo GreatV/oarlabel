@@ -1,127 +1,300 @@
-import { CheckCircle2, Cloud, Loader2, Save } from "lucide-react";
+import { FolderOpen } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Textarea } from "@/components/ui/textarea";
 import { t } from "@/i18n";
-import { api } from "@/lib/tauri";
+import { api, pickFile } from "@/lib/tauri";
 import { useStore } from "@/store";
+import type { CustomOcrPaths } from "@/types";
 
 interface SettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
+const CUSTOM_OCR_PROFILE_KEY = "custom_text_ocr";
+
 export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
-  const models = useStore((s) => s.models);
   const locale = useStore((s) => s.locale);
+  const minBoxSize = useStore((s) => s.minBoxSize);
+  const setMinBoxSize = useStore((s) => s.setMinBoxSize);
+  const inferenceTuning = useStore((s) => s.inferenceTuning);
+  const setInferenceTuning = useStore((s) => s.setInferenceTuning);
   const refreshModels = useStore((s) => s.refreshModels);
-  const [configText, setConfigText] = useState("");
-  const [savingConfig, setSavingConfig] = useState(false);
+  const setOcrModel = useStore((s) => s.setOcrModel);
+  const [customPaths, setCustomPaths] = useState<CustomOcrPaths>({
+    textDetectionModelPath: "",
+    textRecognitionModelPath: "",
+    textRecognitionDictPath: "",
+  });
 
   useEffect(() => {
     if (!open) return;
-    refreshModels();
     api
-      .readModelConfig()
-      .then(setConfigText)
+      .readCustomOcrPaths()
+      .then(setCustomPaths)
       .catch((e) => {
         useStore.setState({
-          statusMsg: `${t(locale, "settings.readConfigFailed")}: ${String(e)}`,
+          statusMsg: `${t(locale, "settings.readCustomModelFailed")}: ${String(e)}`,
         });
       });
-  }, [open, refreshModels, locale]);
+  }, [open, locale]);
 
-  const saveConfig = async () => {
-    setSavingConfig(true);
+  const saveCustomPaths = async (paths: CustomOcrPaths) => {
     try {
-      await api.saveModelConfig(configText);
+      await api.saveCustomOcrPaths(paths);
       await refreshModels();
-      useStore.setState({ statusMsg: t(locale, "settings.configSaved") });
+      const hasCustomProfile =
+        useStore
+          .getState()
+          .modelOptions?.ocr_profiles.some((profile) => profile.key === CUSTOM_OCR_PROFILE_KEY) ??
+        false;
+      if (hasCustomProfile) {
+        setOcrModel(CUSTOM_OCR_PROFILE_KEY);
+      }
+      useStore.setState({ statusMsg: t(locale, "settings.customModelSaved") });
     } catch (e) {
       useStore.setState({
-        statusMsg: `${t(locale, "settings.configSaveFailed")}: ${String(e)}`,
+        statusMsg: `${t(locale, "settings.customModelSaveFailed")}: ${String(e)}`,
       });
-    } finally {
-      setSavingConfig(false);
     }
+  };
+
+  const updateCustomPath = (key: keyof CustomOcrPaths, value: string) => {
+    setCustomPaths((paths) => ({ ...paths, [key]: value }));
+  };
+
+  const chooseCustomPath = async (
+    key: keyof CustomOcrPaths,
+    title: string,
+    extensions?: string[],
+  ) => {
+    const path = await pickFile(title, extensions);
+    if (!path) return;
+    const next = { ...customPaths, [key]: path };
+    setCustomPaths(next);
+    await saveCustomPaths(next);
+  };
+
+  const updateTextDetectionTuning = (key: string, value: number) => {
+    setInferenceTuning({
+      ...inferenceTuning,
+      ocr: { ...inferenceTuning.ocr, [key]: value },
+    });
+  };
+
+  const updateTextRecognitionTuning = (key: string, value: number) => {
+    setInferenceTuning({
+      ...inferenceTuning,
+      text_recognition: { ...inferenceTuning.text_recognition, [key]: value },
+    });
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl">
+      <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>{t(locale, "settings.title")}</DialogTitle>
-          <DialogDescription>{t(locale, "settings.desc")}</DialogDescription>
         </DialogHeader>
 
         <div className="rounded-lg border p-3">
-          <div className="mb-2 flex items-center justify-between gap-3">
+          <div className="mb-3 flex items-center justify-between gap-3 border-b pb-3">
+            <div>
+              <div className="text-sm font-medium">{t(locale, "settings.annotationTitle")}</div>
+              <div className="text-xs text-muted-foreground">
+                {t(locale, "settings.minBoxSizeDesc")}
+              </div>
+            </div>
+            <Input
+              className="w-24"
+              type="number"
+              min={1}
+              max={128}
+              step={1}
+              value={minBoxSize}
+              aria-label={t(locale, "settings.minBoxSize")}
+              onChange={(e) => setMinBoxSize(e.target.valueAsNumber)}
+            />
+          </div>
+          <div className="mb-3 border-b pb-3">
+            <div className="mb-3">
+              <div className="text-sm font-medium">{t(locale, "settings.textParamsTitle")}</div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <ThresholdNumber
+                label={t(locale, "settings.ocrScoreThreshold")}
+                value={inferenceTuning.ocr.score_threshold ?? 0}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(value) => updateTextDetectionTuning("score_threshold", value)}
+              />
+              <ThresholdNumber
+                label={t(locale, "settings.ocrBoxThreshold")}
+                value={inferenceTuning.ocr.box_threshold ?? 0}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(value) => updateTextDetectionTuning("box_threshold", value)}
+              />
+              <ThresholdNumber
+                label={t(locale, "settings.ocrUnclipRatio")}
+                value={inferenceTuning.ocr.unclip_ratio ?? 0}
+                min={0}
+                max={10}
+                step={0.1}
+                onChange={(value) => updateTextDetectionTuning("unclip_ratio", value)}
+              />
+              <ThresholdNumber
+                label={t(locale, "settings.textRecognitionScoreThreshold")}
+                value={inferenceTuning.text_recognition.score_threshold ?? 0}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(value) => updateTextRecognitionTuning("score_threshold", value)}
+              />
+              <ThresholdNumber
+                label={t(locale, "settings.textRecognitionMaxLength")}
+                value={inferenceTuning.text_recognition.max_text_length ?? 1}
+                min={1}
+                max={1024}
+                step={1}
+                onChange={(value) => updateTextRecognitionTuning("max_text_length", value)}
+              />
+            </div>
+          </div>
+          <div className="mb-2">
             <div>
               <div className="text-sm font-medium">{t(locale, "settings.customTitle")}</div>
               <div className="text-xs text-muted-foreground">
                 {t(locale, "settings.customDesc")}
               </div>
             </div>
-            <Button size="sm" variant="secondary" onClick={saveConfig} disabled={savingConfig}>
-              {savingConfig ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Save className="h-4 w-4" />
-              )}
-              {t(locale, "settings.saveConfig")}
-            </Button>
           </div>
-          <Textarea
-            className="h-36 resize-none font-mono text-xs"
-            spellCheck={false}
-            value={configText}
-            onChange={(e) => setConfigText(e.target.value)}
-          />
-        </div>
-
-        <div className="max-h-[40vh] space-y-2 overflow-y-auto pr-1">
-          {models.length === 0 && (
-            <p className="py-6 text-center text-sm text-muted-foreground">
-              {t(locale, "settings.loading")}
-            </p>
-          )}
-          {models.map((m) => (
-            <div key={m.key} className="rounded-lg border px-3 py-2.5">
-              <div className="flex items-center gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="truncate text-sm font-medium">{m.title}</span>
-                    {m.bundled && (
-                      <span className="rounded bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                        {t(locale, "common.bundled")}
-                      </span>
-                    )}
-                  </div>
-                  <div className="truncate text-xs text-muted-foreground">
-                    {m.filename} - {m.size_label}
-                  </div>
-                </div>
-                {m.present ? (
-                  <span className="flex items-center gap-1 text-xs text-status-success-foreground">
-                    <CheckCircle2 className="h-4 w-4" /> {t(locale, "common.available")}
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                    <Cloud className="h-4 w-4" /> {t(locale, "settings.autoDownload")}
-                  </span>
-                )}
-              </div>
-            </div>
-          ))}
+          <div className="grid gap-3">
+            <PathInput
+              label={t(locale, "settings.customTextDetectionModel")}
+              value={customPaths.textDetectionModelPath}
+              onChange={(value) => updateCustomPath("textDetectionModelPath", value)}
+              onCommit={() => saveCustomPaths(customPaths)}
+              onBrowse={() =>
+                chooseCustomPath(
+                  "textDetectionModelPath",
+                  t(locale, "settings.customTextDetectionModel"),
+                  ["onnx"],
+                )
+              }
+              browseLabel={t(locale, "settings.chooseFile")}
+            />
+            <PathInput
+              label={t(locale, "settings.customTextRecognitionModel")}
+              value={customPaths.textRecognitionModelPath}
+              onChange={(value) => updateCustomPath("textRecognitionModelPath", value)}
+              onCommit={() => saveCustomPaths(customPaths)}
+              onBrowse={() =>
+                chooseCustomPath(
+                  "textRecognitionModelPath",
+                  t(locale, "settings.customTextRecognitionModel"),
+                  ["onnx"],
+                )
+              }
+              browseLabel={t(locale, "settings.chooseFile")}
+            />
+            <PathInput
+              label={t(locale, "settings.customTextRecognitionDict")}
+              value={customPaths.textRecognitionDictPath}
+              onChange={(value) => updateCustomPath("textRecognitionDictPath", value)}
+              onCommit={() => saveCustomPaths(customPaths)}
+              onBrowse={() =>
+                chooseCustomPath(
+                  "textRecognitionDictPath",
+                  t(locale, "settings.customTextRecognitionDict"),
+                  ["txt"],
+                )
+              }
+              browseLabel={t(locale, "settings.chooseFile")}
+            />
+          </div>
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function PathInput({
+  label,
+  value,
+  browseLabel,
+  onChange,
+  onCommit,
+  onBrowse,
+}: {
+  label: string;
+  value: string;
+  browseLabel: string;
+  onChange: (value: string) => void;
+  onCommit: () => void;
+  onBrowse: () => void;
+}) {
+  return (
+    <label className="grid gap-1 text-xs font-medium">
+      <span>{label}</span>
+      <div className="flex gap-2">
+        <Input
+          className="min-w-0 flex-1 font-mono text-xs"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={onCommit}
+        />
+        <Button
+          type="button"
+          size="icon"
+          variant="secondary"
+          aria-label={browseLabel}
+          title={browseLabel}
+          onClick={onBrowse}
+        >
+          <FolderOpen className="h-4 w-4" />
+        </Button>
+      </div>
+    </label>
+  );
+}
+function ThresholdNumber({
+  label,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="grid gap-1 text-xs font-medium">
+      <span>{label}</span>
+      <Input
+        type="number"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => {
+          const value = e.target.valueAsNumber;
+          onChange(Number.isFinite(value) ? value : min);
+        }}
+      />
+    </label>
   );
 }

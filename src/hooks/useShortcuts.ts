@@ -13,6 +13,9 @@ export function useShortcuts() {
       if (meta && e.key.toLowerCase() === "s") {
         e.preventDefault();
         s.save();
+      } else if (meta && e.key === "Enter") {
+        e.preventDefault();
+        void s.saveAndNext();
       } else if (meta && e.shiftKey && e.key.toLowerCase() === "z") {
         e.preventDefault();
         s.redo();
@@ -48,8 +51,6 @@ export function useShortcuts() {
         s.setTool(s.tool === "rect" ? "select" : "rect");
       } else if (!meta && (e.key === "p" || e.key === "P")) {
         s.setTool(s.tool === "polygon" ? "select" : "polygon");
-      } else if (!meta && (e.key === "e" || e.key === "E")) {
-        s.setTool(s.tool === "edit" ? "select" : "edit");
       }
     };
     window.addEventListener("keydown", onKey);
