@@ -3,7 +3,7 @@ name = "oarlabel"
 version = "0.1.0"
 description = "Desktop OCR / layout annotation tool built with Tauri + oar-ocr"
 authors = ["Wang Xin"]
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/GreatV/oarlabel"
 edition = "2021"
 

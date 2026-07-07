@@ -1,38 +1,28 @@
 # oarlabel
 
-A desktop OCR / document-layout annotation tool built with [Tauri](https://tauri.app),
-React, and [oar-ocr](https://github.com/GreatV/oar-ocr). It turns a folder of
-images (or an imported PDF) into a browsable, annotatable workspace and exports
-the result as PPOCRLabel-compatible training data.
+Desktop annotation tool for OCR, document layout, and formula recognition.
+
+Built with [Tauri](https://github.com/tauri-apps/tauri),
+[React](https://github.com/facebook/react), and
+[oar-ocr](https://github.com/GreatV/oar-ocr).
 
 ## Features
 
-- **Five annotation modes:** OCR text regions, layout detection, formula
-  recognition, table structure recognition, and reading-order extraction.
-- **AI pre-annotation:** run detection/recognition over the current image or the
-  whole folder, then refine by hand. Batch runs are cancelable.
-- **Canvas tools:** rectangle and polygon drawing, point editing, drag-to-move,
-  undo/redo, copy/paste, cursor-anchored scroll zoom.
-- **Per-image JSON annotations** stored next to each image, plus dataset export
-  (`Label.txt` for detection, `crop_img/` + `rec_gt.txt` for recognition).
-- **Configurable model catalog** with auto-download via oar-ocr, CPU/CUDA
-  device selection, and zh-CN / en-US UI.
+- OCR, layout detection, and formula annotation modes
+- Manual box editing with rectangle and polygon tools
+- AI pre-annotation for the current image or a batch of images
+- Per-image JSON annotation files
+- PPOCRLabel-compatible dataset export
 
-## Getting started
+## Development
 
-Prerequisites: [Node.js](https://nodejs.org/), a recent Rust toolchain, and the
-[Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
+Prerequisites: Node.js, Rust, and the Tauri v2 system dependencies.
 
 ```bash
-npm install          # install frontend dependencies
-npm run tauri dev    # run the desktop app in development
-npm run tauri build  # produce a production bundle
+npm install
+npm run tauri dev
 ```
-
-Models are resolved and downloaded automatically by oar-ocr on first use (see
-the in-app **Settings → Model configuration** to inspect or override the
-catalog).
 
 ## License
 
-MIT
+Apache-2.0
