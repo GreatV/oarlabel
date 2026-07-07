@@ -78,8 +78,6 @@ pub struct TextDetectionTuning {
 pub struct TextRecognitionTuning {
     #[serde(default)]
     pub score_threshold: Option<f32>,
-    #[serde(default)]
-    pub max_text_length: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -231,10 +229,8 @@ impl ModelConfig {
             match m.source {
                 // Remote models are resolved/downloaded by oar-ocr keyed on the
                 // bare filename, so that's the only field we can validate here.
-                ModelSource::GitHubRelease | ModelSource::ModelScope => {
-                    if m.filename.is_empty() {
-                        return Err(format!("Model filename cannot be empty: {}", m.key));
-                    }
+                ModelSource::GitHubRelease | ModelSource::ModelScope if m.filename.is_empty() => {
+                    return Err(format!("Model filename cannot be empty: {}", m.key));
                 }
                 ModelSource::Local if m.path.as_deref().unwrap_or("").is_empty() => {
                     return Err(format!("Local model missing path: {}", m.key));
@@ -294,11 +290,6 @@ fn validate_text_recognition_tuning(
     owner: &str,
 ) -> Result<(), String> {
     validate_unit("score_threshold", tuning.score_threshold, owner)?;
-    if let Some(v) = tuning.max_text_length {
-        if v == 0 {
-            return Err(format!("{owner}.max_text_length must be >= 1"));
-        }
-    }
     Ok(())
 }
 
@@ -399,25 +390,25 @@ fn append_custom_ocr_profile(cfg: &mut ModelConfig, paths: CustomOcrPaths) {
     }
     cfg.models.push(local_model(
         CUSTOM_DET_KEY,
-        "自定义文本检测模型",
+        "Custom text detection model",
         ModelKind::Det,
         &paths.text_detection_model_path,
     ));
     cfg.models.push(local_model(
         CUSTOM_REC_KEY,
-        "自定义文本识别模型",
+        "Custom text recognition model",
         ModelKind::Rec,
         &paths.text_recognition_model_path,
     ));
     cfg.models.push(local_model(
         CUSTOM_DICT_KEY,
-        "自定义文本识别字典",
+        "Custom text recognition dictionary",
         ModelKind::Dict,
         &paths.text_recognition_dict_path,
     ));
     cfg.ocr_profiles.push(OcrProfile {
         key: CUSTOM_OCR_PROFILE_KEY.into(),
-        title: "自定义文本 OCR".into(),
+        title: "Custom text OCR".into(),
         det: CUSTOM_DET_KEY.into(),
         rec: CUSTOM_REC_KEY.into(),
         dict: CUSTOM_DICT_KEY.into(),
@@ -456,7 +447,7 @@ pub fn profile(app: &AppHandle, key: &str) -> Result<OcrProfile, String> {
         .ocr_profiles
         .into_iter()
         .find(|p| p.key == key)
-        .ok_or_else(|| format!("未知 OCR 模型档位: {key}"))
+        .ok_or_else(|| format!("Unknown OCR profile: {key}"))
 }
 
 pub fn formula_profile(app: &AppHandle, key: &str) -> Result<FormulaProfile, String> {
@@ -464,7 +455,7 @@ pub fn formula_profile(app: &AppHandle, key: &str) -> Result<FormulaProfile, Str
         .formula_profiles
         .into_iter()
         .find(|p| p.key == key)
-        .ok_or_else(|| format!("未知公式识别模型: {key}"))
+        .ok_or_else(|| format!("Unknown formula recognition model: {key}"))
 }
 
 pub fn table_profile(app: &AppHandle, key: &str) -> Result<TableProfile, String> {
@@ -472,7 +463,7 @@ pub fn table_profile(app: &AppHandle, key: &str) -> Result<TableProfile, String>
         .table_profiles
         .into_iter()
         .find(|p| p.key == key)
-        .ok_or_else(|| format!("未知表格识别模型: {key}"))
+        .ok_or_else(|| format!("Unknown table recognition model: {key}"))
 }
 
 pub fn def(app: &AppHandle, key: &str) -> Result<ModelDef, String> {

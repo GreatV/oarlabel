@@ -85,7 +85,7 @@ const MIN_BOX_SIZE_LOWER_BOUND = 1;
 const MIN_BOX_SIZE_UPPER_BOUND = 128;
 const DEFAULT_INFERENCE_TUNING: Required<InferenceTuning> = {
   ocr: { score_threshold: 0.2, box_threshold: 0.45, unclip_ratio: 1.4 },
-  text_recognition: { score_threshold: 0, max_text_length: 25 },
+  text_recognition: { score_threshold: 0 },
   layout: { score_threshold: 0.5, nms_threshold: 0.5, max_elements: 100 },
 };
 
@@ -277,14 +277,6 @@ function normalizeInferenceTuning(value: Partial<InferenceTuning>): Required<Inf
         0,
         1,
       ),
-      max_text_length: Math.round(
-        clampNumber(
-          textRecognition.max_text_length,
-          DEFAULT_INFERENCE_TUNING.text_recognition.max_text_length!,
-          1,
-          1024,
-        ),
-      ),
     },
     layout: {
       score_threshold: clampNumber(
@@ -378,15 +370,79 @@ function emptyAnnotationFile(): ImageAnnotationFile {
   return { version: 1, status: "pending", annotations: [] };
 }
 
+const VALID_IMAGE_STATUSES: ReadonlySet<ImageStatus> = new Set([
+  "pending",
+  "preannotated",
+  "labeling",
+  "done",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPoint(value: unknown): value is Point {
+  return (
+    Array.isArray(value) &&
+    value.length === 2 &&
+    typeof value[0] === "number" &&
+    Number.isFinite(value[0]) &&
+    typeof value[1] === "number" &&
+    Number.isFinite(value[1])
+  );
+}
+
+function normalizeAnnotationResult(value: unknown): AnnotationResult | null {
+  if (!isRecord(value)) return null;
+  const { task, source, score } = value;
+  if (typeof task !== "string") return null;
+  if (source !== "manual" && source !== "auto") return null;
+  if (score !== null && (typeof score !== "number" || !Number.isFinite(score))) return null;
+  return {
+    task,
+    source,
+    score,
+    value: isRecord(value.value) ? value.value : {},
+  };
+}
+
+function normalizeAnnotationInput(value: unknown): Annotation | null {
+  if (!isRecord(value)) return null;
+  const points = Array.isArray(value.points) ? value.points.filter(isPoint) : [];
+  const results = Array.isArray(value.results)
+    ? value.results.map(normalizeAnnotationResult).filter((r): r is AnnotationResult => r !== null)
+    : [];
+  if (points.length < 2 || results.length === 0) return null;
+  const shape =
+    value.shape === "rect" || value.shape === "polygon" ? value.shape : inferShape(points);
+  const parentId =
+    typeof value.parentId === "string" ? value.parentId : value.parentId === null ? null : null;
+  return normalizeAnnotation({
+    id: typeof value.id === "string" && value.id ? value.id : uid(),
+    points,
+    hidden: value.hidden === true,
+    shape,
+    parentId,
+    results,
+  });
+}
+
 function parseAnnotationFile(text: string | null): ImageAnnotationFile {
   if (!text) return emptyAnnotationFile();
-  const parsed = JSON.parse(text) as Partial<ImageAnnotationFile>;
+  const parsed = JSON.parse(text) as unknown;
+  if (!isRecord(parsed)) return emptyAnnotationFile();
+  const status = typeof parsed.status === "string" && VALID_IMAGE_STATUSES.has(parsed.status as ImageStatus)
+    ? (parsed.status as ImageStatus)
+    : "pending";
+  const annotations = Array.isArray(parsed.annotations)
+    ? parsed.annotations
+        .map(normalizeAnnotationInput)
+        .filter((a): a is Annotation => a !== null)
+    : [];
   return {
     version: 1,
-    status: parsed.status ?? "pending",
-    annotations: Array.isArray(parsed.annotations)
-      ? parsed.annotations.map(normalizeAnnotation)
-      : [],
+    status,
+    annotations,
   };
 }
 
@@ -714,7 +770,7 @@ export const useStore = create<AppState>((set, get) => {
   }
 
   async function canDiscardDirty(): Promise<boolean> {
-    return !get().dirty || confirmDiscardChanges();
+    return !get().dirty || confirmDiscardChanges(get().locale);
   }
 
   async function annotationFileForExport(path: string): Promise<ImageAnnotationFile> {
@@ -1353,7 +1409,7 @@ export const useStore = create<AppState>((set, get) => {
       const img = get().currentImage();
       if (!img || get().busy) return;
       const existing = get().currentAnnos().length;
-      if (existing > 0 && !(await confirmReplaceAnnotations(existing))) return;
+      if (existing > 0 && !(await confirmReplaceAnnotations(get().locale, existing))) return;
       const locale = get().locale;
       set({ busy: true, statusMsg: t(locale, "message.preannotatingCurrent") });
       try {
@@ -1398,6 +1454,7 @@ export const useStore = create<AppState>((set, get) => {
       if (
         annotationCount > 0 &&
         !(await confirmReplaceBatchAnnotations(
+          get().locale,
           images.length,
           annotatedImageCount,
           annotationCount,

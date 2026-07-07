@@ -36,7 +36,7 @@ pub fn export_detection(images: &[ExportImage], out_dir: &str) -> Result<String,
         let p = Path::new(&img.path);
         let fname = unique_export_name(p, &mut used_names);
         std::fs::copy(p, images_dir.join(&fname))
-            .map_err(|e| format!("复制图像失败 {}: {e}", img.path))?;
+            .map_err(|e| format!("Failed to copy image {}: {e}", img.path))?;
         let rel = format!("images/{}", fname);
 
         let arr: Vec<serde_json::Value> = img
@@ -78,7 +78,7 @@ pub fn export_recognition(images: &[ExportImage], out_dir: &str) -> Result<Strin
             continue;
         }
         let src = image::open(&img.path)
-            .map_err(|e| format!("打开图像失败 {}: {e}", img.path))?
+            .map_err(|e| format!("Failed to open image {}: {e}", img.path))?
             .to_rgb8();
 
         for b in &img.boxes {
@@ -90,7 +90,7 @@ pub fn export_recognition(images: &[ExportImage], out_dir: &str) -> Result<Strin
             let name = format!("img_{:06}.jpg", counter);
             counter += 1;
             crop.save(crop_dir.join(&name))
-                .map_err(|e| format!("保存裁剪图失败: {e}"))?;
+                .map_err(|e| format!("Failed to save crop image: {e}"))?;
             gt.push_str(&format!("crop_img/{}\t{}\n", name, sanitize_rec_text(text)));
         }
     }
@@ -245,4 +245,50 @@ fn crop_quad(src: &RgbImage, points: &[[f32; 2]]) -> RgbImage {
         }
     }
     dst
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_rec_text_collapses_record_separators() {
+        assert_eq!(
+            sanitize_rec_text("  hello\tworld\nnext\r\u{0007}field  "),
+            "hello world next field"
+        );
+    }
+
+    #[test]
+    fn unique_export_name_adds_suffix_for_collisions() {
+        let mut used = HashSet::new();
+
+        assert_eq!(
+            unique_export_name(Path::new("scan.jpg"), &mut used),
+            "scan.jpg"
+        );
+        assert_eq!(
+            unique_export_name(Path::new("other/scan.jpg"), &mut used),
+            "scan_1.jpg"
+        );
+    }
+
+    #[test]
+    fn order_quad_normalizes_unordered_points() {
+        let ordered = order_quad(&[[10.0, 10.0], [0.0, 0.0], [0.0, 10.0], [10.0, 0.0]]);
+
+        assert_eq!(
+            ordered,
+            [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]
+        );
+    }
+
+    #[test]
+    fn crop_quad_returns_stable_minimum_size() {
+        let src = RgbImage::from_pixel(2, 2, Rgb([12, 34, 56]));
+        let crop = crop_quad(&src, &[[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]);
+
+        assert_eq!((crop.width(), crop.height()), (1, 1));
+        assert_eq!(crop.get_pixel(0, 0), &Rgb([12, 34, 56]));
+    }
 }

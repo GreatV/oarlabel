@@ -172,3 +172,65 @@ pub fn save_annotation(image_path: &str, data: &str) -> Result<(), String> {
     std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_workspace(name: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "oarlabel-project-test-{name}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn sidecar_path_keeps_full_image_filename() {
+        let dir = temp_workspace("sidecar");
+        let image = dir.join("page.001.jpg");
+        std::fs::write(&image, b"not a real image").unwrap();
+
+        let sidecar = annotation_path(image.to_str().unwrap()).unwrap();
+
+        assert_eq!(sidecar.file_name().unwrap(), "page.001.jpg.json");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_annotation_is_ignored_when_stem_is_ambiguous() {
+        let dir = temp_workspace("legacy");
+        let jpg = dir.join("page.jpg");
+        let png = dir.join("page.png");
+        std::fs::write(&jpg, b"jpg").unwrap();
+        std::fs::write(&png, b"png").unwrap();
+        std::fs::write(dir.join("page.json"), br#"{"version":1}"#).unwrap();
+
+        let loaded = read_annotation(jpg.to_str().unwrap()).unwrap();
+
+        assert!(loaded.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn save_annotation_writes_atomically_to_full_name_sidecar() {
+        let dir = temp_workspace("save");
+        let image = dir.join("scan.png");
+        std::fs::write(&image, b"png").unwrap();
+
+        save_annotation(image.to_str().unwrap(), r#"{"version":1}"#).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("scan.png.json")).unwrap(),
+            r#"{"version":1}"#
+        );
+        assert!(!dir.join("scan.png.json.tmp").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

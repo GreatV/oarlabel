@@ -38,10 +38,7 @@ export function TitleBar({ onClose }: TitleBarProps) {
       )}
     >
       {!isMac && (
-        <div className="flex items-center gap-1.5">
-          <div className="flex h-4 w-4 items-center justify-center rounded-full bg-gradient-to-br from-[hsl(var(--brand-start))] to-[hsl(var(--brand-end))]">
-            <div className="h-1.5 w-1.5 rounded-full bg-white/90" />
-          </div>
+        <div className="flex items-center">
           <span className="text-xs font-semibold tracking-tight text-foreground">oarlabel</span>
         </div>
       )}

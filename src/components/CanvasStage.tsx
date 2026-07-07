@@ -206,6 +206,9 @@ export function CanvasStage() {
       );
       setPan({ x: nextPan.x, y: mode === "width" ? 16 : nextPan.y });
     },
+    // `zoom` is read only to tag fit-originated changes. Including it here
+    // recreates applyFit after setZoom and can re-run fit effects.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [image, size.h, size.w],
   );
 

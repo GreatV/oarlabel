@@ -58,7 +58,11 @@ export function ResultsPanel({ width }: ResultsPanelProps) {
   const toggleCollapse = (id: string) =>
     setCollapsed((cur) => {
       const next = new Set(cur);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
       return next;
     });
 

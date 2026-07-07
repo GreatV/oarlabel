@@ -14,15 +14,21 @@
 //!    handled by the OS and emit nothing.
 
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
 use std::sync::OnceLock;
 
 use serde::Deserialize;
+#[cfg(target_os = "macos")]
 use tauri::menu::{
     CheckMenuItem, IsMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu,
 };
-use tauri::{AppHandle, Wry};
+use tauri::AppHandle;
+#[cfg(target_os = "macos")]
+use tauri::Wry;
 
+#[cfg(target_os = "macos")]
 const ZH_JSON: &str = include_str!("../../src/locales/zh-CN.json");
+#[cfg(target_os = "macos")]
 const EN_JSON: &str = include_str!("../../src/locales/en-US.json");
 
 // The seven view-toggle keys ("oar:view:<key>") are built into the View
@@ -31,6 +37,7 @@ const EN_JSON: &str = include_str!("../../src/locales/en-US.json");
 
 /// Cached parsed locale tables. `tr()` is called ~45× per menu rebuild, and
 /// re-parsing the whole locale JSON each time is wasteful; parse once.
+#[cfg(target_os = "macos")]
 fn locale_table(locale: &str) -> &'static HashMap<&'static str, String> {
     static ZH: OnceLock<HashMap<&'static str, String>> = OnceLock::new();
     static EN: OnceLock<HashMap<&'static str, String>> = OnceLock::new();
@@ -42,6 +49,7 @@ fn locale_table(locale: &str) -> &'static HashMap<&'static str, String> {
 
 /// Look up a localized menu label. Falls back to the key (and then English) so
 /// a missing translation never produces an empty string in the menu.
+#[cfg(target_os = "macos")]
 fn tr(locale: &str, key: &str) -> String {
     locale_table(locale)
         .get(key)
@@ -55,6 +63,7 @@ fn tr(locale: &str, key: &str) -> String {
 /// hardcoded `true` (which made hidden panels show as checked on every
 /// rebuild). Missing/unknown keys default to true (the original behavior).
 #[derive(Default, Deserialize)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct ViewState {
     #[serde(default)]
     pub view: HashMap<String, bool>,
@@ -74,6 +83,7 @@ pub struct ViewState {
 
 impl ViewState {
     /// Checked state for a view item id, defaulting to true.
+    #[cfg(target_os = "macos")]
     fn checked(&self, item_id: &str) -> bool {
         // item_id looks like "oar:view:fileList"; the view key is the suffix.
         self.view
@@ -82,10 +92,12 @@ impl ViewState {
             .unwrap_or(true)
     }
 
+    #[cfg(target_os = "macos")]
     fn theme_checked(&self, theme: &str) -> bool {
         self.theme.as_deref().unwrap_or("system") == theme
     }
 
+    #[cfg(target_os = "macos")]
     fn model_checked(&self, kind: &str, key: &str) -> bool {
         match kind {
             "ocr" => self.ocr_model.as_deref() == Some(key),
@@ -96,6 +108,7 @@ impl ViewState {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn device_checked(&self, device: &str) -> bool {
         self.device.as_deref().unwrap_or("auto") == device
     }
@@ -117,6 +130,7 @@ pub fn rebuild(app: &AppHandle, locale: &str, state: &ViewState) {
 
 /// No-op off-macOS: the in-window MenuBar.tsx is the UI there.
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 pub fn rebuild(_app: &AppHandle, _locale: &str, _state: &ViewState) {}
 
 #[cfg(target_os = "macos")]
@@ -677,4 +691,5 @@ pub fn set_theme_checked(app: &AppHandle, selected: &str) {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 pub fn set_theme_checked(_app: &AppHandle, _selected: &str) {}

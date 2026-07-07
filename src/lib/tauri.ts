@@ -4,6 +4,7 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { t, tt, type Locale } from "@/i18n";
 import type {
   CustomOcrPaths,
   ImageItem,
@@ -34,28 +35,33 @@ export async function pickFile(title: string, extensions?: string[]): Promise<st
   return typeof res === "string" ? res : null;
 }
 
-export function confirmDiscardChanges(): Promise<boolean> {
+export function confirmDiscardChanges(locale: Locale): Promise<boolean> {
   return confirm(
-    "There are unsaved annotation changes. Continue and discard them?",
-    { title: "Unsaved changes", kind: "warning" },
+    t(locale, "confirm.discardChanges.message"),
+    { title: t(locale, "confirm.discardChanges.title"), kind: "warning" },
   );
 }
 
-export function confirmReplaceAnnotations(count: number): Promise<boolean> {
+export function confirmReplaceAnnotations(locale: Locale, count: number): Promise<boolean> {
   return confirm(
-    `This will replace ${count} existing annotation${count === 1 ? "" : "s"} on the current image. Continue?`,
-    { title: "Replace annotations", kind: "warning" },
+    tt(locale, "confirm.replaceAnnotations.message", { count }),
+    { title: t(locale, "confirm.replaceAnnotations.title"), kind: "warning" },
   );
 }
 
 export function confirmReplaceBatchAnnotations(
+  locale: Locale,
   imageCount: number,
   annotatedImageCount: number,
   annotationCount: number,
 ): Promise<boolean> {
   return confirm(
-    `Batch pre-annotation will process ${imageCount} images and replace ${annotationCount} existing annotation${annotationCount === 1 ? "" : "s"} on ${annotatedImageCount} image${annotatedImageCount === 1 ? "" : "s"}. Continue?`,
-    { title: "Replace annotations", kind: "warning" },
+    tt(locale, "confirm.replaceBatchAnnotations.message", {
+      imageCount,
+      annotatedImageCount,
+      annotationCount,
+    }),
+    { title: t(locale, "confirm.replaceAnnotations.title"), kind: "warning" },
   );
 }
 

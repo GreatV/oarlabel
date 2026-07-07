@@ -25,14 +25,15 @@ use crate::models;
 fn resolve_model_path(app: &AppHandle, key: &str, role: &str) -> Result<PathBuf, String> {
     let def = models::def(app, key)?;
     models::resolve(app, key).ok_or_else(|| match def.source {
-        models::ModelSource::Local => format!("{role}本地路径无效 ({key})"),
-        _ => format!("{role}模型配置异常 ({key})"),
+        models::ModelSource::Local => format!("Invalid local path for {role} ({key})"),
+        _ => format!("Invalid model configuration for {role} ({key})"),
     })
 }
 
 fn resolve_predictor_asset_path(app: &AppHandle, key: &str, role: &str) -> Result<PathBuf, String> {
     let path = resolve_model_path(app, key, role)?;
-    oar_ocr::download::resolve_path(&path).map_err(|e| format!("{role}解析失败 ({key}): {e}"))
+    oar_ocr::download::resolve_path(&path)
+        .map_err(|e| format!("Failed to resolve {role} ({key}): {e}"))
 }
 
 fn apply_text_tuning(cfg: &mut TextDetectionConfig, tuning: Option<models::TextDetectionTuning>) {
@@ -56,9 +57,6 @@ fn apply_text_recognition_tuning(
     if let Some(t) = tuning {
         if let Some(v) = t.score_threshold {
             cfg.score_threshold = v;
-        }
-        if let Some(v) = t.max_text_length {
-            cfg.max_text_length = v;
         }
     }
 }
@@ -157,9 +155,11 @@ fn ort_config_for(device: &str) -> Result<Option<OrtSessionConfig>, String> {
                 0
             } else if let Some(id) = d.strip_prefix("cuda:") {
                 id.parse::<i32>()
-                    .map_err(|_| format!("无效的 CUDA 设备号: {device}"))?
+                    .map_err(|_| format!("Invalid CUDA device index: {device}"))?
             } else {
-                return Err(format!("无效的设备格式: {device}，应为 'cuda' 或 'cuda:N'"));
+                return Err(format!(
+                    "Invalid device format: {device}; expected 'cuda' or 'cuda:N'"
+                ));
             };
             let cfg = OrtSessionConfig::new().with_execution_providers(vec![
                 OrtExecutionProvider::CUDA {
@@ -179,13 +179,15 @@ fn ort_config_for(device: &str) -> Result<Option<OrtSessionConfig>, String> {
     {
         if d.starts_with("cuda") {
             return Err(
-                "已选择 CUDA，但当前版本未启用 CUDA 支持。请改用 CPU，或使用 `cargo build --features cuda` 重新构建。"
+                "CUDA was selected, but this build does not enable CUDA support. Use CPU or rebuild with `cargo build --features cuda`."
                     .into(),
             );
         }
     }
 
-    Err(format!("不支持的设备: {device}，支持 cpu / auto"))
+    Err(format!(
+        "Unsupported device: {device}; supported values are cpu / auto"
+    ))
 }
 
 fn get_or_build_ocr(
@@ -202,12 +204,11 @@ fn get_or_build_ocr(
     apply_text_recognition_tuning(&mut rec_config, prof.text_recognition);
     apply_text_recognition_tuning(&mut rec_config, tuning.and_then(|t| t.text_recognition));
     let cache_key = format!(
-        "{profile_key}|{device}|td:{:.4}:{:.4}:{:.4}|tr:{:.4}:{}|tlo:{}",
+        "{profile_key}|{device}|td:{:.4}:{:.4}:{:.4}|tr:{:.4}|tlo:{}",
         text_config.score_threshold,
         text_config.box_threshold,
         text_config.unclip_ratio,
         rec_config.score_threshold,
-        rec_config.max_text_length,
         models::TEXT_LINE_ORIENTATION_MODEL_KEY
     );
     let cell = OCR.get_or_init(|| Mutex::new(HashMap::new()));
@@ -221,13 +222,13 @@ fn get_or_build_ocr(
         return Ok(existing.clone());
     }
 
-    let det = resolve_model_path(app, &prof.det, "文本检测模型")?;
-    let rec = resolve_predictor_asset_path(app, &prof.rec, "文本识别模型")?;
-    let dict = resolve_predictor_asset_path(app, &prof.dict, "文本识别字典")?;
+    let det = resolve_model_path(app, &prof.det, "text detection model")?;
+    let rec = resolve_predictor_asset_path(app, &prof.rec, "text recognition model")?;
+    let dict = resolve_predictor_asset_path(app, &prof.dict, "text recognition dictionary")?;
     let text_line_orientation = resolve_model_path(
         app,
         models::TEXT_LINE_ORIENTATION_MODEL_KEY,
-        "文本行方向分类模型",
+        "text line orientation model",
     )?;
 
     tracing::info!(
@@ -247,7 +248,7 @@ fn get_or_build_ocr(
     }
     let ocr = builder
         .build()
-        .map_err(|e| format!("构建 OCR 流水线失败: {e}"))?;
+        .map_err(|e| format!("Failed to build OCR pipeline: {e}"))?;
     let arc = Arc::new(ocr);
     let mut guard = cell.lock().map_err(|e| e.to_string())?;
     if let Some(existing) = guard.get(&cache_key) {
@@ -272,8 +273,8 @@ fn get_or_build_text_recognition(
     apply_text_recognition_tuning(&mut rec_config, prof.text_recognition);
     apply_text_recognition_tuning(&mut rec_config, tuning);
     let cache_key = format!(
-        "{profile_key}|{device}|tr:{:.4}:{}",
-        rec_config.score_threshold, rec_config.max_text_length
+        "{profile_key}|{device}|tr:{:.4}",
+        rec_config.score_threshold
     );
     let cell = TEXT_RECOGNITION.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(existing) = cell
@@ -290,27 +291,25 @@ fn get_or_build_text_recognition(
         return Ok(existing.clone());
     }
 
-    let rec = resolve_predictor_asset_path(app, &prof.rec, "文本识别模型")?;
-    let dict = resolve_predictor_asset_path(app, &prof.dict, "文本识别字典")?;
+    let rec = resolve_predictor_asset_path(app, &prof.rec, "text recognition model")?;
+    let dict = resolve_predictor_asset_path(app, &prof.dict, "text recognition dictionary")?;
     tracing::info!(
         profile = %profile_key,
         device = %device,
         rec = %rec.display(),
         dict = %dict.display(),
         score_threshold = rec_config.score_threshold,
-        max_text_length = rec_config.max_text_length,
         "building text recognition predictor"
     );
     let mut builder = TextRecognitionPredictor::builder()
         .score_threshold(rec_config.score_threshold)
-        .max_text_length(rec_config.max_text_length)
         .dict_path(&dict);
     if let Some(cfg) = ort_config_for(device)? {
         builder = builder.with_ort_config(cfg);
     }
     let predictor = builder
         .build(&rec)
-        .map_err(|e| format!("构建文本识别器失败: {e}"))?;
+        .map_err(|e| format!("Failed to build text recognizer: {e}"))?;
     let arc = Arc::new(predictor);
     let mut guard = cell.lock().map_err(|e| e.to_string())?;
     if let Some(existing) = guard.get(&cache_key) {
@@ -331,7 +330,7 @@ fn get_or_build_layout(
         if d.kind == models::ModelKind::Layout {
             Ok(d)
         } else {
-            Err(format!("不是版面检测模型: {layout_key}"))
+            Err(format!("Not a layout detection model: {layout_key}"))
         }
     })?;
     let mut layout_config = LayoutDetectionConfig::default();
@@ -351,10 +350,10 @@ fn get_or_build_layout(
         return Ok(existing.clone());
     }
 
-    let model = resolve_model_path(app, layout_key, "版面检测模型")?;
+    let model = resolve_model_path(app, layout_key, "layout detection model")?;
     let model_name = d
         .pipeline_name
-        .ok_or_else(|| format!("版面检测模型缺少 pipeline_name: {layout_key}"))?;
+        .ok_or_else(|| format!("Layout detection model is missing pipeline_name: {layout_key}"))?;
 
     let mut builder = LayoutDetectionPredictor::builder()
         .with_config(layout_config)
@@ -364,7 +363,7 @@ fn get_or_build_layout(
     }
     let predictor = builder
         .build(&model)
-        .map_err(|e| format!("构建版面检测器失败: {e}"))?;
+        .map_err(|e| format!("Failed to build layout detector: {e}"))?;
     let arc = Arc::new(predictor);
     let mut guard = cell.lock().map_err(|e| e.to_string())?;
     if let Some(existing) = guard.get(&cache_key) {
@@ -392,8 +391,8 @@ fn get_or_build_formula(
     }
 
     let prof = models::formula_profile(app, formula_key)?;
-    let model = resolve_model_path(app, &prof.model, "公式识别模型")?;
-    let tokenizer = resolve_model_path(app, &prof.tokenizer, "公式识别 tokenizer")?;
+    let model = resolve_model_path(app, &prof.model, "formula recognition model")?;
+    let tokenizer = resolve_model_path(app, &prof.tokenizer, "formula recognition tokenizer")?;
 
     let mut builder = FormulaRecognitionPredictor::builder()
         .model_name(&prof.model_name)
@@ -403,7 +402,7 @@ fn get_or_build_formula(
     }
     let predictor = builder
         .build(&model)
-        .map_err(|e| format!("构建公式识别器失败: {e}"))?;
+        .map_err(|e| format!("Failed to build formula recognizer: {e}"))?;
     let arc = Arc::new(predictor);
     let mut guard = cell.lock().map_err(|e| e.to_string())?;
     if let Some(existing) = guard.get(&cache_key) {
@@ -431,8 +430,8 @@ fn get_or_build_table(
     }
 
     let prof = models::table_profile(app, table_key)?;
-    let model = resolve_model_path(app, &prof.structure, "表格识别模型")?;
-    let dict = resolve_model_path(app, &prof.dict, "表格结构字典")?;
+    let model = resolve_model_path(app, &prof.structure, "table recognition model")?;
+    let dict = resolve_model_path(app, &prof.dict, "table structure dictionary")?;
 
     let mut builder = TableStructureRecognitionPredictor::builder()
         .model_name(&prof.model_name)
@@ -442,7 +441,7 @@ fn get_or_build_table(
     }
     let predictor = builder
         .build(&model)
-        .map_err(|e| format!("构建表格识别器失败: {e}"))?;
+        .map_err(|e| format!("Failed to build table recognizer: {e}"))?;
     let arc = Arc::new(predictor);
     let mut guard = cell.lock().map_err(|e| e.to_string())?;
     if let Some(existing) = guard.get(&cache_key) {
@@ -480,7 +479,7 @@ fn crop_region(
         || x_max <= x_min
         || y_max <= y_min
     {
-        return Err("识别区域坐标无效".into());
+        return Err("Invalid recognition region coordinates".into());
     }
 
     let image_width = image.width() as f32;
@@ -490,7 +489,7 @@ fn crop_region(
     let x1 = x_max.ceil().clamp(0.0, image_width) as u32;
     let y1 = y_max.ceil().clamp(0.0, image_height) as u32;
     if x1 <= x0 || y1 <= y0 {
-        return Err("识别区域超出图像范围".into());
+        return Err("Recognition region is outside the image bounds".into());
     }
 
     let crop = image::imageops::crop_imm(image, x0, y0, x1 - x0, y1 - y0).to_image();
@@ -560,21 +559,22 @@ fn is_vertical_quad(points: &[[f32; 2]]) -> bool {
 
 fn crop_quad(src: &image::RgbImage, points: &[[f32; 2]]) -> Result<image::RgbImage, String> {
     if points.is_empty() {
-        return Err("识别区域坐标无效".into());
+        return Err("Invalid recognition region coordinates".into());
     }
     let [tl, tr, br, bl] = order_quad(points);
     if ![tl, tr, br, bl]
         .iter()
         .all(|p| p[0].is_finite() && p[1].is_finite())
     {
-        return Err("识别区域坐标无效".into());
+        return Err("Invalid recognition region coordinates".into());
     }
 
     let box_points = [tl, tr, br, bl]
         .into_iter()
         .map(|p| Point::new(p[0], p[1]))
         .collect::<Vec<_>>();
-    get_rotate_crop_image(src, &box_points).map_err(|e| format!("识别区域裁剪失败: {e}"))
+    get_rotate_crop_image(src, &box_points)
+        .map_err(|e| format!("Failed to crop recognition region: {e}"))
 }
 
 pub fn recognize_text_regions(
@@ -599,7 +599,8 @@ pub fn recognize_text_regions(
         device,
         tuning.and_then(|t| t.text_recognition),
     )?;
-    let image = load_image(Path::new(image_path)).map_err(|e| format!("加载图像失败: {e}"))?;
+    let image =
+        load_image(Path::new(image_path)).map_err(|e| format!("Failed to load image: {e}"))?;
     let mut ids = Vec::new();
     let mut crops = Vec::new();
     let mut crop_region_indexes = Vec::new();
@@ -638,7 +639,7 @@ pub fn recognize_text_regions(
 
     let result = predictor
         .predict(crops)
-        .map_err(|e| format!("文本识别失败: {e}"))?;
+        .map_err(|e| format!("Text recognition failed: {e}"))?;
     let mut best = vec![None::<(String, f32)>; ids.len()];
     for (candidate_idx, region_idx) in crop_region_indexes.into_iter().enumerate() {
         let Some(text) = result.texts.get(candidate_idx).cloned() else {
@@ -688,10 +689,11 @@ pub fn run_ocr(
     tuning: Option<models::InferenceTuning>,
 ) -> Result<PreannResult, String> {
     let ocr = get_or_build_ocr(app, profile_key, device, tuning)?;
-    let img = load_image(Path::new(image_path)).map_err(|e| format!("加载图像失败: {e}"))?;
+    let img =
+        load_image(Path::new(image_path)).map_err(|e| format!("Failed to load image: {e}"))?;
     let results = ocr
         .predict(vec![img])
-        .map_err(|e| format!("OCR 预测失败: {e}"))?;
+        .map_err(|e| format!("OCR prediction failed: {e}"))?;
 
     let mut out = Vec::new();
     if let Some(res) = results.into_iter().next() {
@@ -731,10 +733,11 @@ pub fn run_reading_order(
     tuning: Option<models::InferenceTuning>,
 ) -> Result<PreannResult, String> {
     let ocr = get_or_build_ocr(app, profile_key, device, tuning)?;
-    let img = load_image(Path::new(image_path)).map_err(|e| format!("加载图像失败: {e}"))?;
+    let img =
+        load_image(Path::new(image_path)).map_err(|e| format!("Failed to load image: {e}"))?;
     let results = ocr
         .predict(vec![img])
-        .map_err(|e| format!("OCR 预测失败: {e}"))?;
+        .map_err(|e| format!("OCR prediction failed: {e}"))?;
 
     let mut out = Vec::new();
     if let Some(res) = results.into_iter().next() {
@@ -772,10 +775,11 @@ pub fn run_layout(
     tuning: Option<models::InferenceTuning>,
 ) -> Result<PreannResult, String> {
     let predictor = get_or_build_layout(app, layout_key, device, tuning.and_then(|t| t.layout))?;
-    let img = load_image(Path::new(image_path)).map_err(|e| format!("加载图像失败: {e}"))?;
+    let img =
+        load_image(Path::new(image_path)).map_err(|e| format!("Failed to load image: {e}"))?;
     let output = predictor
         .predict(vec![img])
-        .map_err(|e| format!("版面检测失败: {e}"))?;
+        .map_err(|e| format!("Layout detection failed: {e}"))?;
 
     let mut out = Vec::new();
     if let Some(elements) = output.elements.into_iter().next() {
@@ -831,7 +835,8 @@ pub fn run_formula(
     )?
     .boxes;
     let predictor = get_or_build_formula(app, formula_key, device)?;
-    let image = load_image(Path::new(image_path)).map_err(|e| format!("加载图像失败: {e}"))?;
+    let image =
+        load_image(Path::new(image_path)).map_err(|e| format!("Failed to load image: {e}"))?;
     let mut out = Vec::with_capacity(regions.len());
     // Skip regions that fail to crop or recognize instead of aborting the whole
     // page: a single bad crop used to discard every formula on the image.
@@ -855,7 +860,7 @@ pub fn run_formula(
                 // are still treated as skippable (one bad crop shouldn't kill
                 // the whole page).
                 if i == 0 {
-                    return Err(format!("公式识别失败: {e}"));
+                    return Err(format!("Formula recognition failed: {e}"));
                 }
                 skipped += 1;
                 continue;
@@ -910,7 +915,8 @@ pub fn run_table(
     )?
     .boxes;
     let predictor = get_or_build_table(app, table_key, device)?;
-    let image = load_image(Path::new(image_path)).map_err(|e| format!("加载图像失败: {e}"))?;
+    let image =
+        load_image(Path::new(image_path)).map_err(|e| format!("Failed to load image: {e}"))?;
     let mut out = Vec::with_capacity(regions.len());
     // As with formulas, skip a bad region rather than failing every table.
     let mut skipped: u32 = 0;
@@ -930,7 +936,7 @@ pub fn run_table(
                 // surface it on the first region rather than masking as
                 // "0 results, N skipped". Later regions stay skippable.
                 if i == 0 {
-                    return Err(format!("表格识别失败: {e}"));
+                    return Err(format!("Table recognition failed: {e}"));
                 }
                 skipped += 1;
                 continue;
@@ -994,42 +1000,26 @@ fn is_text_region(label: &str) -> bool {
 ///
 /// `reading` ⊇ `ocr` (a reading box is an OCR box plus an order index), so when
 /// both are active only `reading` runs in the flat path to avoid double-counting.
+pub struct StructureRunConfig<'a> {
+    pub layout_key: &'a str,
+    pub ocr_key: &'a str,
+    pub formula_key: &'a str,
+    pub table_key: &'a str,
+    pub device: &'a str,
+    pub tuning: Option<models::InferenceTuning>,
+}
+
 pub fn run_structure(
     app: &AppHandle,
     image_path: &str,
     modes: &[String],
-    layout_key: &str,
-    ocr_key: &str,
-    formula_key: &str,
-    table_key: &str,
-    device: &str,
-    tuning: Option<models::InferenceTuning>,
+    config: StructureRunConfig<'_>,
 ) -> Result<PreannResult, String> {
     let want_layout = modes.iter().any(|m| m == "layout");
     if !want_layout {
-        return run_flat(
-            app,
-            image_path,
-            modes,
-            layout_key,
-            ocr_key,
-            formula_key,
-            table_key,
-            device,
-            tuning,
-        );
+        return run_flat(app, image_path, modes, &config);
     }
-    run_structured(
-        app,
-        image_path,
-        modes,
-        layout_key,
-        ocr_key,
-        formula_key,
-        table_key,
-        device,
-        tuning,
-    )
+    run_structured(app, image_path, modes, &config)
 }
 
 /// Flat pipeline (no `layout` mode): run each selected recognizer on the whole
@@ -1043,12 +1033,7 @@ fn run_flat(
     app: &AppHandle,
     image_path: &str,
     modes: &[String],
-    layout_key: &str,
-    ocr_key: &str,
-    formula_key: &str,
-    table_key: &str,
-    device: &str,
-    tuning: Option<models::InferenceTuning>,
+    config: &StructureRunConfig<'_>,
 ) -> Result<PreannResult, String> {
     let want_reading = modes.iter().any(|m| m == "reading");
     let want_ocr = modes.iter().any(|m| m == "ocr");
@@ -1061,21 +1046,47 @@ fn run_flat(
     // `reading` produces OCR boxes + an order index, so it supersedes plain OCR
     // when both are active — run only reading to avoid duplicating text boxes.
     if want_reading {
-        let r = run_reading_order(app, image_path, ocr_key, device, tuning)?;
+        let r = run_reading_order(
+            app,
+            image_path,
+            config.ocr_key,
+            config.device,
+            config.tuning,
+        )?;
         skipped += r.skipped;
         out.extend(r.boxes);
     } else if want_ocr {
-        let r = run_ocr(app, image_path, ocr_key, device, tuning)?;
+        let r = run_ocr(
+            app,
+            image_path,
+            config.ocr_key,
+            config.device,
+            config.tuning,
+        )?;
         skipped += r.skipped;
         out.extend(r.boxes);
     }
     if want_formula {
-        let r = run_formula(app, image_path, layout_key, formula_key, device, tuning)?;
+        let r = run_formula(
+            app,
+            image_path,
+            config.layout_key,
+            config.formula_key,
+            config.device,
+            config.tuning,
+        )?;
         skipped += r.skipped;
         out.extend(r.boxes);
     }
     if want_table {
-        let r = run_table(app, image_path, layout_key, table_key, device, tuning)?;
+        let r = run_table(
+            app,
+            image_path,
+            config.layout_key,
+            config.table_key,
+            config.device,
+            config.tuning,
+        )?;
         skipped += r.skipped;
         out.extend(r.boxes);
     }
@@ -1091,12 +1102,7 @@ fn run_structured(
     app: &AppHandle,
     image_path: &str,
     modes: &[String],
-    layout_key: &str,
-    ocr_key: &str,
-    formula_key: &str,
-    table_key: &str,
-    device: &str,
-    tuning: Option<models::InferenceTuning>,
+    config: &StructureRunConfig<'_>,
 ) -> Result<PreannResult, String> {
     let want_ocr = modes.iter().any(|m| m == "ocr" || m == "reading");
     let want_reading = modes.iter().any(|m| m == "reading");
@@ -1104,21 +1110,39 @@ fn run_structured(
     let want_table = modes.iter().any(|m| m == "table");
 
     // Layout is always the skeleton: regions become parents.
-    let regions = run_layout(app, image_path, None, layout_key, device, tuning)?.boxes;
-    let image = load_image(Path::new(image_path)).map_err(|e| format!("加载图像失败: {e}"))?;
+    let regions = run_layout(
+        app,
+        image_path,
+        None,
+        config.layout_key,
+        config.device,
+        config.tuning,
+    )?
+    .boxes;
+    let image =
+        load_image(Path::new(image_path)).map_err(|e| format!("Failed to load image: {e}"))?;
 
     let ocr = if want_ocr {
-        Some(get_or_build_ocr(app, ocr_key, device, tuning)?)
+        Some(get_or_build_ocr(
+            app,
+            config.ocr_key,
+            config.device,
+            config.tuning,
+        )?)
     } else {
         None
     };
     let formula_predictor = if want_formula {
-        Some(get_or_build_formula(app, formula_key, device)?)
+        Some(get_or_build_formula(
+            app,
+            config.formula_key,
+            config.device,
+        )?)
     } else {
         None
     };
     let table_predictor = if want_table {
-        Some(get_or_build_table(app, table_key, device)?)
+        Some(get_or_build_table(app, config.table_key, config.device)?)
     } else {
         None
     };
@@ -1185,7 +1209,7 @@ fn run_structured(
                     Err(e) => {
                         // OCR predictor failure is systemic (wrong model /
                         // device). Surface it rather than masking as skipped.
-                        return Err(format!("OCR 识别失败: {e}"));
+                        return Err(format!("OCR recognition failed: {e}"));
                     }
                 }
             }
@@ -1216,7 +1240,7 @@ fn run_structured(
                         }
                     }
                     Err(e) => {
-                        return Err(format!("公式识别失败: {e}"));
+                        return Err(format!("Formula recognition failed: {e}"));
                     }
                 }
             }
@@ -1242,7 +1266,7 @@ fn run_structured(
                         }
                     }
                     Err(e) => {
-                        return Err(format!("表格识别失败: {e}"));
+                        return Err(format!("Table recognition failed: {e}"));
                     }
                 }
             }

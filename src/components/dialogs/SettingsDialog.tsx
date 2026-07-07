@@ -159,14 +159,6 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                 step={0.01}
                 onChange={(value) => updateTextRecognitionTuning("score_threshold", value)}
               />
-              <ThresholdNumber
-                label={t(locale, "settings.textRecognitionMaxLength")}
-                value={inferenceTuning.text_recognition.max_text_length ?? 1}
-                min={1}
-                max={1024}
-                step={1}
-                onChange={(value) => updateTextRecognitionTuning("max_text_length", value)}
-              />
             </div>
           </div>
           <div className="mb-2">

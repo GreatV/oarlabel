@@ -17,8 +17,8 @@ const PDF_IMPORT_CACHE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60)
 fn render_pages(pdf_path: &str) -> Result<Vec<image::RgbImage>, String> {
     use hayro::RenderSettings;
 
-    let data = std::fs::read(pdf_path).map_err(|e| format!("读取 PDF 失败: {e}"))?;
-    let pdf = Pdf::new(Arc::new(data)).map_err(|e| format!("解析 PDF 失败: {e:?}"))?;
+    let data = std::fs::read(pdf_path).map_err(|e| format!("Failed to read PDF: {e}"))?;
+    let pdf = Pdf::new(Arc::new(data)).map_err(|e| format!("Failed to parse PDF: {e:?}"))?;
     let pages = pdf.pages();
 
     let interpreter_settings = hayro::hayro_interpret::InterpreterSettings::default();
@@ -29,7 +29,7 @@ fn render_pages(pdf_path: &str) -> Result<Vec<image::RgbImage>, String> {
         let width = (media_box.x1 - media_box.x0) as f32;
         let height = (media_box.y1 - media_box.y0) as f32;
         if width <= 0.0 || height <= 0.0 {
-            return Err(format!("无效的页面尺寸: {width}x{height}"));
+            return Err(format!("Invalid page size: {width}x{height}"));
         }
 
         // Fixed 2x render scale. (There used to be a max_size parameter for
@@ -54,7 +54,7 @@ fn render_pages(pdf_path: &str) -> Result<Vec<image::RgbImage>, String> {
         }
         let img =
             image::RgbImage::from_raw(u32::from(pixmap.width()), u32::from(pixmap.height()), rgb)
-                .ok_or("无法将渲染结果转换为图像")?;
+                .ok_or("Failed to convert rendered page into an image")?;
         out.push(img);
     }
 
@@ -67,21 +67,23 @@ fn cleanup_old_imports(root: &Path) -> Result<(), String> {
     }
 
     let now = SystemTime::now();
-    for entry in std::fs::read_dir(root).map_err(|e| format!("读取 PDF 缓存目录失败: {e}"))?
+    for entry in
+        std::fs::read_dir(root).map_err(|e| format!("Failed to read PDF cache directory: {e}"))?
     {
-        let entry = entry.map_err(|e| format!("读取 PDF 缓存项失败: {e}"))?;
+        let entry = entry.map_err(|e| format!("Failed to read PDF cache entry: {e}"))?;
         let path = entry.path();
         if !path.is_dir() {
             continue;
         }
         let meta = entry
             .metadata()
-            .map_err(|e| format!("读取 PDF 缓存元数据失败: {e}"))?;
+            .map_err(|e| format!("Failed to read PDF cache metadata: {e}"))?;
         let modified = meta
             .modified()
-            .map_err(|e| format!("读取 PDF 缓存修改时间失败: {e}"))?;
+            .map_err(|e| format!("Failed to read PDF cache modification time: {e}"))?;
         if now.duration_since(modified).unwrap_or(Duration::ZERO) > PDF_IMPORT_CACHE_MAX_AGE {
-            std::fs::remove_dir_all(&path).map_err(|e| format!("清理 PDF 缓存失败: {e}"))?;
+            std::fs::remove_dir_all(&path)
+                .map_err(|e| format!("Failed to clean PDF cache: {e}"))?;
         }
     }
     Ok(())
@@ -96,7 +98,7 @@ pub fn import_pdf(
 ) -> Result<Vec<ImageItem>, String> {
     let src = Path::new(pdf_path);
     if !src.is_file() {
-        return Err(format!("PDF 文件不存在: {pdf_path}"));
+        return Err(format!("PDF file does not exist: {pdf_path}"));
     }
 
     let stem = src
@@ -110,16 +112,16 @@ pub fn import_pdf(
             cleanup_old_imports(default_root)?;
             let created_at = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map_err(|e| format!("获取导入时间失败: {e}"))?
+                .map_err(|e| format!("Failed to get import timestamp: {e}"))?
                 .as_millis();
             default_root.join(format!("{stem}_{created_at}_pages"))
         }
     };
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建输出目录失败: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create output directory: {e}"))?;
 
     let pages = render_pages(pdf_path)?;
     if pages.is_empty() {
-        return Err("PDF 没有可渲染的页面".into());
+        return Err("PDF has no renderable pages".into());
     }
 
     let mut items = Vec::with_capacity(pages.len());
@@ -127,7 +129,7 @@ pub fn import_pdf(
         let name = format!("{stem}_page-{:04}.png", i + 1);
         let path = dir.join(&name);
         img.save(&path)
-            .map_err(|e| format!("保存页面 {} 失败: {e}", i + 1))?;
+            .map_err(|e| format!("Failed to save page {}: {e}", i + 1))?;
         items.push(ImageItem {
             path: path.to_string_lossy().to_string(),
             name,

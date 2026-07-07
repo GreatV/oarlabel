@@ -133,7 +133,6 @@ export interface TextDetectionTuning {
 
 export interface TextRecognitionTuning {
   score_threshold?: number;
-  max_text_length?: number;
 }
 
 export interface LayoutDetectionTuning {

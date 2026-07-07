@@ -104,7 +104,8 @@ function App() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     win.onCloseRequested(async (event) => {
-      if (useStore.getState().dirty && !(await confirmDiscardChanges())) {
+      const state = useStore.getState();
+      if (state.dirty && !(await confirmDiscardChanges(state.locale))) {
         event.preventDefault();
       }
     }).then((fn) => {

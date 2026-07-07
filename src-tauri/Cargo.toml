@@ -36,7 +36,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # OCR / image processing
-oar-ocr = { version = "0.7.2", features = ["auto-download"] }
+oar-ocr = { path = "../../oar-ocr", features = ["auto-download"] }
 image = "0.25"
 
 # PDF rendering (pure Rust) for "import PDF"

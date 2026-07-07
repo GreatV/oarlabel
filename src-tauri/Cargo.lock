@@ -3266,9 +3266,7 @@ dependencies = [
 
 [[package]]
 name = "oar-ocr"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ac398ce25558cb7a08ed997d2dac10aec4e8f731a818a4233cf3c87d7cab364"
+version = "0.7.5"
 dependencies = [
  "image",
  "imageproc",
@@ -3283,9 +3281,7 @@ dependencies = [
 
 [[package]]
 name = "oar-ocr-core"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202993248cf96c3dde9cd21c2fe7cf8f0cf27840408a129d571f857a4baa131f"
+version = "0.7.5"
 dependencies = [
  "clipper2-rust",
  "dirs",
@@ -3312,9 +3308,7 @@ dependencies = [
 
 [[package]]
 name = "oar-ocr-derive"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f5fbbf57399cc78cb9469e713402a7c5bca24b39b9942df717e68d48f7bcc36"
+version = "0.7.5"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",

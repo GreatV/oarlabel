@@ -116,7 +116,7 @@ fn list_images(app: AppHandle, dir: String) -> Result<Vec<project::ImageItem>, S
     let items = project::list_images(&dir)?;
     app.asset_protocol_scope()
         .allow_directory(&dir, true)
-        .map_err(|e| format!("授权目录访问失败: {e}"))?;
+        .map_err(|e| format!("Failed to authorize directory access: {e}"))?;
     Ok(items)
 }
 
@@ -151,7 +151,7 @@ async fn import_pdf(
         pdf::import_pdf(&pdf_path, &default_root, out_dir.as_deref())
     })
     .await
-    .map_err(|e| format!("PDF 导入任务失败: {e}"))??;
+    .map_err(|e| format!("PDF import task failed: {e}"))??;
 
     if let Some(first) = items.first() {
         if let Some(parent) = std::path::Path::new(&first.path).parent() {
@@ -260,17 +260,19 @@ async fn preannotate(
             &app,
             &image_path,
             &modes,
-            &layout_model,
-            &ocr_model,
-            &formula_model,
-            &table_model,
-            &device,
-            thresholds,
+            ocr::StructureRunConfig {
+                layout_key: &layout_model,
+                ocr_key: &ocr_model,
+                formula_key: &formula_model,
+                table_key: &table_model,
+                device: &device,
+                tuning: thresholds,
+            },
         ),
-        other => Err(format!("未知模式: {other}")),
+        other => Err(format!("Unknown mode: {other}")),
     })
     .await
-    .map_err(|e| format!("预标注任务失败: {e}"))?;
+    .map_err(|e| format!("Pre-annotation task failed: {e}"))?;
     match &result {
         Ok(value) => tracing::info!(
             mode = %log_mode,
@@ -310,7 +312,7 @@ async fn recognize_text_regions(
         ocr::recognize_text_regions(&app, &image_path, &ocr_model, &device, regions, thresholds)
     })
     .await
-    .map_err(|e| format!("文本识别任务失败: {e}"))?;
+    .map_err(|e| format!("Text recognition task failed: {e}"))?;
     match &result {
         Ok(value) => tracing::info!(
             regions = value.regions.len(),
@@ -331,10 +333,10 @@ async fn export_dataset(
     tauri::async_runtime::spawn_blocking(move || match kind.as_str() {
         "detection" => export::export_detection(&images, &out_dir),
         "recognition" => export::export_recognition(&images, &out_dir),
-        other => Err(format!("未知导出类型: {other}")),
+        other => Err(format!("Unknown export type: {other}")),
     })
     .await
-    .map_err(|e| format!("导出任务失败: {e}"))?
+    .map_err(|e| format!("Export task failed: {e}"))?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -396,6 +398,7 @@ pub fn run() {
             // is JSON: {"locale":"zh-CN","view":{"fileList":true,...}}. The
             // view map seeds the View checkbox items with their real checked
             // value so a rebuild never resets hidden panels to checked.
+            #[cfg(target_os = "macos")]
             let handle = app.handle().clone();
             app.listen("oar:set-locale", move |event| {
                 let (locale, state) = parse_menu_payload(event.payload());
@@ -404,6 +407,7 @@ pub fn run() {
                 let _ = (&locale, &state); // silence unused off-macOS
             });
 
+            #[cfg(target_os = "macos")]
             let handle = app.handle().clone();
             app.listen("oar:rebuild-menu", move |event| {
                 let (locale, state) = parse_menu_payload(event.payload());
@@ -414,6 +418,7 @@ pub fn run() {
 
             // The frontend tells us when a View checkbox should flip so the
             // native item stays in sync with the React `view` state.
+            #[cfg(target_os = "macos")]
             let handle = app.handle().clone();
             app.listen("oar:set-menu-state", move |event| {
                 if let Some(payload) = event

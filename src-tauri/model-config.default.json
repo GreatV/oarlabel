@@ -810,8 +810,7 @@
         "unclip_ratio": 1.4
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -826,8 +825,7 @@
         "unclip_ratio": 1.4
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -842,8 +840,7 @@
         "unclip_ratio": 1.4
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -858,8 +855,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -874,8 +870,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -890,8 +885,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -906,8 +900,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -922,8 +915,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -938,8 +930,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -954,8 +945,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -970,8 +960,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -986,8 +975,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -1002,8 +990,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -1018,8 +1005,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -1034,8 +1020,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -1050,8 +1035,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -1066,8 +1050,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -1082,8 +1065,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     },
     {
@@ -1098,8 +1080,7 @@
         "unclip_ratio": 1.5
       },
       "text_recognition": {
-        "score_threshold": 0,
-        "max_text_length": 25
+        "score_threshold": 0
       }
     }
   ],
