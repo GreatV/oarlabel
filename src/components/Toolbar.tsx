@@ -7,14 +7,12 @@ import {
   GripVertical,
   Hexagon,
   LayoutTemplate,
-  ListOrdered,
   MousePointer2,
   Save,
   ScanText,
   Sigma,
   Sparkles,
   SquareDashed,
-  Table2,
   Upload,
 } from "lucide-react";
 import { useEffect, useState, type PointerEvent as ReactPointerEvent } from "react";
@@ -41,8 +39,6 @@ const MODES: { key: Mode; icon: React.ReactNode }[] = [
   { key: "ocr", icon: <ScanText className="h-4 w-4" /> },
   { key: "layout", icon: <LayoutTemplate className="h-4 w-4" /> },
   { key: "formula", icon: <Sigma className="h-4 w-4" /> },
-  { key: "table", icon: <Table2 className="h-4 w-4" /> },
-  { key: "reading", icon: <ListOrdered className="h-4 w-4" /> },
 ];
 
 const TOOLS: { key: Tool; labelKey: MessageKey; icon: React.ReactNode }[] = [
@@ -220,21 +216,11 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
         </span>
 
         <ToggleGroup
-          type="multiple"
+          type="single"
           orientation={vertical ? "vertical" : "horizontal"}
-          value={s.modes}
-          // Radix "multiple" emits the full new set on each toggle; find the
-          // single added/removed member and delegate to toggleMode so recency
-          // (append = new primary) and the min-one-active rule stay in the store.
+          value={s.modes[0]}
           onValueChange={(next) => {
-            const cur = s.modes;
-            const added = next.find((m) => !cur.includes(m as Mode));
-            if (added) {
-              s.toggleMode(added as Mode);
-              return;
-            }
-            const removed = cur.find((m) => !next.includes(m));
-            if (removed) s.toggleMode(removed);
+            if (next) s.toggleMode(next as Mode);
           }}
           className={cn(vertical && "w-full flex-col")}
         >

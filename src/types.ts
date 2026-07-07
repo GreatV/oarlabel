@@ -1,6 +1,6 @@
 // Shared domain types for the oarlabel frontend.
 
-export type Mode = "ocr" | "layout" | "formula" | "table" | "reading";
+export type Mode = "ocr" | "layout" | "formula";
 
 /** UI theme. `system` follows the OS `prefers-color-scheme` setting. */
 export type Theme = "light" | "dark" | "system";
@@ -62,7 +62,7 @@ export interface PreannBox {
   text: string | null;
   label: string | null;
   score: number | null;
-  /** Reading-order position (0-based). Set only by reading-order mode. */
+  /** Reading-order position (0-based), when the active pipeline can provide or compute it. */
   order?: number | null;
   /** Stable region id (snake_case on the wire from Rust serde). Only set by
    *  the structured pipeline on layout-detected region boxes, so children can
@@ -185,7 +185,7 @@ export function resultText(a: Annotation): string {
   return typeof text === "string" ? text : "";
 }
 
-/** Reading-order index, if the annotation carries one (reading-order mode). */
+/** Reading-order index, if the annotation carries one. */
 export function resultReadingIndex(a: Annotation): number | undefined {
   const idx = a.results.find((r) => r.task === "reading_order")?.value.index;
   return typeof idx === "number" ? idx : undefined;

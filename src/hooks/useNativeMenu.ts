@@ -30,7 +30,6 @@ interface NativeMenuPayload {
   ocrModel: string;
   layoutModel: string;
   formulaModel: string;
-  tableModel: string;
   device: string;
 }
 
@@ -50,7 +49,6 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
     let lastOcrModel = useStore.getState().ocrModel;
     let lastLayoutModel = useStore.getState().layoutModel;
     let lastFormulaModel = useStore.getState().formulaModel;
-    let lastTableModel = useStore.getState().tableModel;
     let lastDevice = useStore.getState().device;
 
     // Build the structured rebuild payload Rust parses into (locale, ViewState).
@@ -64,7 +62,6 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
         ocrModel,
         layoutModel,
         formulaModel,
-        tableModel,
         device,
       } = useStore.getState();
       return {
@@ -74,7 +71,6 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
         ocrModel,
         layoutModel,
         formulaModel,
-        tableModel,
         device,
       };
     };
@@ -86,7 +82,6 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
       lastOcrModel = state.ocrModel;
       lastLayoutModel = state.layoutModel;
       lastFormulaModel = state.formulaModel;
-      lastTableModel = state.tableModel;
       lastDevice = state.device;
       void emit(event, rebuildPayload());
     };
@@ -102,7 +97,6 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
         ocrModel,
         layoutModel,
         formulaModel,
-        tableModel,
         device,
         modelOptions,
       } = useStore.getState();
@@ -129,7 +123,7 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
         }
       }
       const syncModelGroup = (
-        kind: "ocr" | "layout" | "formula" | "table",
+        kind: "ocr" | "layout" | "formula",
         options: ModelOption[] | undefined,
         selected: string,
       ) => {
@@ -151,10 +145,6 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
       if (formulaModel !== lastFormulaModel) {
         lastFormulaModel = formulaModel;
         syncModelGroup("formula", modelOptions?.formula_profiles, formulaModel);
-      }
-      if (tableModel !== lastTableModel) {
-        lastTableModel = tableModel;
-        syncModelGroup("table", modelOptions?.table_profiles, tableModel);
       }
       if (locale !== lastLocale) {
         // Locale change: full rebuild, seeding view/theme state into the new menu.
@@ -236,7 +226,6 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
       if (kind === "ocr") s.setOcrModel(key);
       else if (kind === "layout") s.setLayoutModel(key);
       else if (kind === "formula") s.setFormulaModel(key);
-      else if (kind === "table") s.setTableModel(key);
     };
 
     // Dispatch a single menu id, handling the dynamic prefixes

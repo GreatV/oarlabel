@@ -25,7 +25,6 @@ import {
   SlidersHorizontal,
   Sparkles,
   SunMoon,
-  Table2,
   Trash2,
   Undo2,
   Upload,
@@ -325,23 +324,6 @@ export function MenuBar({
               <MenubarLabel>{t(l, "menu.model.formulaRecognitionHint")}</MenubarLabel>
               <MenubarRadioGroup value={s.formulaModel} onValueChange={(v) => s.setFormulaModel(v)}>
                 {(modelOptions?.formula_profiles ?? []).map((o) => (
-                  <MenubarRadioItem key={o.key} value={o.key}>
-                    {o.title}
-                  </MenubarRadioItem>
-                ))}
-              </MenubarRadioGroup>
-            </MenubarSubContent>
-          </MenubarSub>
-
-          <MenubarSub>
-            <MenubarSubTrigger>
-              <Table2 className={ico} />
-              {t(l, "menu.model.tableRecognition")}
-            </MenubarSubTrigger>
-            <MenubarSubContent>
-              <MenubarLabel>{t(l, "menu.model.tableRecognitionHint")}</MenubarLabel>
-              <MenubarRadioGroup value={s.tableModel} onValueChange={(v) => s.setTableModel(v)}>
-                {(modelOptions?.table_profiles ?? []).map((o) => (
                   <MenubarRadioItem key={o.key} value={o.key}>
                     {o.title}
                   </MenubarRadioItem>

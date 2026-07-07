@@ -1,5 +1,7 @@
 import { ChevronDown, ChevronRight, FileText, ScanText } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import katex from "katex";
+import "katex/dist/katex.min.css";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { InputHTMLAttributes } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -171,6 +173,8 @@ function ResultRow({
   // carries recognized text (text/formula/table) shows an editable input;
   // a pure layout region shows its label + detection score.
   const hasText = anno.results.some((r) => r.task === "text_recognition");
+  const label = resultLabel(anno);
+  const isFormula = label === "formula";
   // In reading-order mode the badge shows the logical order index (1-based)
   // instead of the row position, so it matches the exported sequence.
   const readingIdx = resultReadingIndex(anno);
@@ -208,10 +212,11 @@ function ResultRow({
           </span>
           {hasText ? (
             <div className="min-w-0 flex-1">
+              {isFormula && <FormulaPreview latex={resultText(anno)} />}
               <CommitTextarea
                 value={resultText(anno)}
-                placeholder={t(l, "results.placeholder")}
-                ariaLabel={t(l, "results.textTitle")}
+                placeholder={isFormula ? "LaTeX..." : t(l, "results.placeholder")}
+                ariaLabel={isFormula ? "LaTeX" : t(l, "results.textTitle")}
                 onCommit={(value) => s.setText(anno.id, value)}
               />
               <OriginalValue value={originalText(anno)} current={resultText(anno)} />
@@ -232,7 +237,7 @@ function ResultRow({
                 </button>
               )}
               <CommitLabelInput
-                value={resultLabel(anno) ?? ""}
+                value={label ?? ""}
                 placeholder={t(l, "results.region")}
                 aria-label={t(l, "results.region")}
                 onCommit={(value) => s.setLabel(anno.id, value)}
@@ -240,7 +245,7 @@ function ResultRow({
               {score != null && (
                 <span className="text-xs text-muted-foreground">{(score * 100).toFixed(1)}%</span>
               )}
-              <OriginalValue value={originalLabel(anno)} current={resultLabel(anno) ?? ""} />
+              <OriginalValue value={originalLabel(anno)} current={label ?? ""} />
             </div>
           )}
         </div>
@@ -278,6 +283,24 @@ function ResultRow({
         </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
+  );
+}
+
+function FormulaPreview({ latex }: { latex: string }) {
+  const html = useMemo(() => {
+    if (!latex.trim()) return "";
+    return katex.renderToString(latex, {
+      displayMode: true,
+      throwOnError: false,
+      strict: "ignore",
+    });
+  }, [latex]);
+  if (!html) return null;
+  return (
+    <div
+      className="mb-1 overflow-x-auto rounded border border-border bg-background px-2 py-1.5 text-center"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
   );
 }
 

@@ -150,6 +150,20 @@ export const api = {
         thresholds: thresholds ?? null,
       },
     }),
+  recognizeFormulaRegions: (
+    imagePath: string,
+    formulaModel: string,
+    device: string,
+    regions: TextRegionInput[],
+  ) =>
+    invoke<TextRecognitionRegionResult>("recognize_formula_regions", {
+      imagePath,
+      params: {
+        formulaModel,
+        device,
+        regions,
+      },
+    }),
   exportDataset: (
     images: { path: string; boxes: { points: number[][]; transcription: string }[] }[],
     outDir: string,

@@ -76,8 +76,6 @@ pub struct ViewState {
     #[serde(default)]
     pub formula_model: Option<String>,
     #[serde(default)]
-    pub table_model: Option<String>,
-    #[serde(default)]
     pub device: Option<String>,
 }
 
@@ -103,7 +101,6 @@ impl ViewState {
             "ocr" => self.ocr_model.as_deref() == Some(key),
             "layout" => self.layout_model.as_deref() == Some(key),
             "formula" => self.formula_model.as_deref() == Some(key),
-            "table" => self.table_model.as_deref() == Some(key),
             _ => false,
         }
     }
@@ -548,13 +545,6 @@ fn build_model_menu(app: &AppHandle, locale: &str, state: &ViewState) -> Option<
         &opts.formula_profiles,
         state,
     )?;
-    let table = model_radio_submenu(
-        app,
-        &tr(locale, "menu.model.tableRecognition"),
-        "table",
-        &opts.table_profiles,
-        state,
-    )?;
     let device = Submenu::with_items(
         app,
         tr(locale, "menu.model.device"),
@@ -599,7 +589,6 @@ fn build_model_menu(app: &AppHandle, locale: &str, state: &ViewState) -> Option<
             &ocr,
             &layout,
             &formula,
-            &table,
             &PredefinedMenuItem::separator(app).ok()?,
             &device,
             &PredefinedMenuItem::separator(app).ok()?,

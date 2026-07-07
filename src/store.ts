@@ -96,7 +96,7 @@ function cloneAnno(a: Annotation): Annotation {
     hidden: a.hidden,
     shape: a.shape,
     results: a.results.map((r) => ({ ...r, value: { ...r.value } })),
-    // Preserve parentId so paste can rebuild the parent→child tree. Dropping
+    // Preserve parentId so paste can rebuild the parent-child tree. Dropping
     // it silently defeats the remap in paste() (children become orphans).
     parentId: a.parentId,
   };
@@ -110,9 +110,8 @@ interface AppState {
   selectedIds: string[];
   selectedId: string | null; // primary (last) selection, derived from selectedIds
   clipboard: Annotation[];
-  // Active annotation modes (multi-select). The last element is the "primary"
-  // mode — used as the default label for manually drawn boxes. Toggling a mode
-  // pushes it to the end so the most recently selected mode becomes primary.
+  // Active annotation modes. Currently single-select, kept as an array for
+  // compatibility with stored state and backend payloads.
   modes: Mode[];
   tool: Tool;
   zoom: number;
@@ -174,7 +173,7 @@ interface AppState {
   setText: (id: string, text: string) => void;
   ensureTextResult: (id: string) => void;
   setAnnotationHidden: (id: string, hidden: boolean) => void;
-  /** Update a region's category label (layout/formula/table/…). */
+  /** Update a region's category label (layout/formula/etc.). */
   setLabel: (id: string, label: string) => void;
   removeAnnotation: (id: string) => void;
   removeSelected: () => void;
@@ -449,7 +448,6 @@ function parseAnnotationFile(text: string | null): ImageAnnotationFile {
 
 function currentLabel(mode: Mode, explicit?: string): string {
   if (explicit) return explicit;
-  if (mode === "table") return "table";
   if (mode === "formula") return "formula";
   if (mode === "layout") return "layout";
   return "text";
@@ -519,7 +517,7 @@ function setTextResult(a: Annotation, text: string): Annotation {
 /** Rewrite a region's category label. The label lives on the
  *  `layout_detection` result's `value.label`; if absent (e.g. a hand-drawn box
  *  that only has text_detection), append a fresh manual layout_detection entry.
- *  Other results (text_recognition for formula/table LaTeX, reading_order, …)
+ *  Other results (text_recognition for formula/table LaTeX, reading_order, etc.)
  *  are preserved verbatim. */
 function setLabelResult(a: Annotation, label: string): Annotation {
   let found = false;
@@ -597,6 +595,49 @@ function setAutoTextResult(a: Annotation, text: string, score: number | null): A
   };
 }
 
+function setAutoFormulaResult(a: Annotation, latex: string, score: number | null): Annotation {
+  let hasLayout = false;
+  let hasText = false;
+  const results = a.results.map((r) => {
+    if (r.task === "layout_detection") {
+      hasLayout = true;
+      return {
+        ...r,
+        value: { ...r.value, label: "formula" },
+        score: score ?? r.score,
+        source: "auto" as const,
+      };
+    }
+    if (r.task === "text_recognition") {
+      hasText = true;
+      return {
+        ...r,
+        value: { ...r.value, text: latex, latex },
+        score,
+        source: "auto" as const,
+      };
+    }
+    return r;
+  });
+  if (!hasLayout) {
+    results.push({
+      task: "layout_detection",
+      value: { label: "formula" },
+      score,
+      source: "auto",
+    });
+  }
+  if (!hasText) {
+    results.push({
+      task: "text_recognition",
+      value: { text: latex, latex },
+      score,
+      source: "auto",
+    });
+  }
+  return { ...a, results };
+}
+
 interface AnnoOpts {
   /** Parent region id, for children produced by the structured pipeline. */
   parentId?: string | null;
@@ -646,9 +687,13 @@ function readingOrderAnnotation(
   opts: AnnoOpts = {},
 ): Annotation {
   const base = textAnnotation(points, text, score, opts);
+  return withReadingOrder(base, index);
+}
+
+function withReadingOrder(a: Annotation, index: number): Annotation {
   return {
-    ...base,
-    results: base.results.concat({
+    ...a,
+    results: a.results.concat({
       task: "reading_order",
       value: { index },
       score: null,
@@ -829,7 +874,7 @@ export const useStore = create<AppState>((set, get) => {
         );
       }
       const skipped =
-        result.skipped > 0 ? `，${tt(locale, "message.regionsSkipped", { skipped: result.skipped })}` : "";
+        result.skipped > 0 ? `, ${tt(locale, "message.regionsSkipped", { skipped: result.skipped })}` : "";
       set({
         statusMsg: `${tt(locale, "message.recognizeTextComplete", {
           count: result.regions.length,
@@ -842,18 +887,60 @@ export const useStore = create<AppState>((set, get) => {
     }
   }
 
+  async function recognizeFormulaForAnnotations(annotations: Annotation[]): Promise<void> {
+    const img = get().currentImage();
+    const locale = get().locale;
+    if (!img) return;
+    if (!annotations.length) {
+      set({ statusMsg: t(locale, "message.recognizeFormulaNoBoxes") });
+      return;
+    }
+
+    const regions: TextRegionInput[] = annotations.map((a) => ({
+      id: a.id,
+      points: a.points,
+    }));
+    set({ busy: true, statusMsg: t(locale, "message.recognizingFormula") });
+    try {
+      const result = await api.recognizeFormulaRegions(
+        img.path,
+        get().formulaModel,
+        get().device,
+        regions,
+      );
+      if (result.regions.length) {
+        const recognized = new Map(result.regions.map((r) => [r.id, r]));
+        mutate((prev) =>
+          prev.map((a) => {
+            const r = recognized.get(a.id);
+            return r ? setAutoFormulaResult(a, r.text, r.score) : a;
+          }),
+        );
+      }
+      const skipped =
+        result.skipped > 0 ? `，${tt(locale, "message.regionsSkipped", { skipped: result.skipped })}` : "";
+      set({
+        statusMsg: `${tt(locale, "message.recognizeFormulaComplete", {
+          count: result.regions.length,
+        })}${skipped}`,
+      });
+    } catch (e) {
+      set({ statusMsg: `${t(locale, "message.recognizeFormulaFailed")}: ${String(e)}` });
+    } finally {
+      set({ busy: false });
+    }
+  }
+
   async function runPreannotation(
     path: string,
     params: PreannParams = snapshotPreannParams(),
   ): Promise<{ annos: Annotation[]; skipped: number }> {
     const { modes, ocrModel, layoutModel, formulaModel, tableModel, device, thresholds } = params;
     const locale = get().locale;
-    // Structured pipeline: layout regions as parents, recognition results as
-    // children linked via id/parent_id. One backend call covers all active
-    // modes; which recognizers run is decided backend-side by `modes`.
+    const mode = modes[0] ?? "ocr";
     const result: PreannResult = await api.preannotate(
       path,
-      "structure",
+      mode,
       ocrModel,
       layoutModel,
       formulaModel,
@@ -866,31 +953,21 @@ export const useStore = create<AppState>((set, get) => {
     const annos = boxes.map<Annotation>((b) => {
       const parentId = b.parent_id ?? null;
       const label = b.label ?? null;
-      // Region parent from the structured pipeline (carries an id): always a
-      // plain layout region, kept as a parent for its children to attach to.
-      if (b.id) {
-        return layoutAnnotation(b.points, label ?? "region", b.score, { id: b.id });
+      if (mode === "layout") {
+        const anno = layoutAnnotation(b.points, label ?? "region", b.score, { parentId });
+        return b.order != null ? withReadingOrder(anno, b.order) : anno;
       }
-      // reading-order text line (ocr+reading, structured or flat) — needs text.
+      if (mode === "formula") {
+        if (b.text == null) throw new Error(tt(locale, "message.resultMissingText", { mode }));
+        return recognizedLayoutAnnotation(b.points, label ?? "formula", b.text, b.score, {
+          parentId,
+        });
+      }
+      if (b.text == null) throw new Error(t(locale, "message.ocrMissingText"));
       if (b.order != null) {
-        if (b.text == null) throw new Error(t(locale, "message.ocrMissingText"));
         return readingOrderAnnotation(b.points, b.text, b.order, b.score, { parentId });
       }
-      // Formula/table box (recognized LaTeX / table structure). Both the
-      // structured child and the flat whole-image run carry label + text.
-      if (label === "formula" || label === "table") {
-        if (b.text == null)
-          throw new Error(tt(locale, "message.resultMissingText", { mode: label }));
-        return recognizedLayoutAnnotation(b.points, label, b.text, b.score, { parentId });
-      }
-      // OCR text line: label is "text" (structured child) OR null (flat OCR run
-      // — run_ocr emits text boxes without a label). Either way it's text.
-      if (label === "text" || label === null) {
-        if (b.text == null) throw new Error(t(locale, "message.ocrMissingText"));
-        return textAnnotation(b.points, b.text, b.score, { parentId });
-      }
-      // Anything else with a layout label is a plain layout region.
-      return layoutAnnotation(b.points, label, b.score, { parentId });
+      return textAnnotation(b.points, b.text, b.score, { parentId });
     });
     return { annos, skipped: result.skipped };
   }
@@ -1147,17 +1224,7 @@ export const useStore = create<AppState>((set, get) => {
       void get().selectIndex(get().currentIndex - 1);
     },
 
-    toggleMode: (mode) =>
-      set((s) => {
-        const has = s.modes.includes(mode);
-        // Never allow removing the last active mode — at least one must stay
-        // so pre-annotation/manual-draw always have a primary mode.
-        if (has && s.modes.length <= 1) return {};
-        const modes = has
-          ? s.modes.filter((m) => m !== mode)
-          : [...s.modes, mode]; // append → becomes the new primary (last)
-        return { modes, selectedIds: [], selectedId: null };
-      }),
+    toggleMode: (mode) => set({ modes: [mode], selectedIds: [], selectedId: null }),
     setTool: (tool) => set({ tool }),
     setZoom: (zoom) => set({ zoom: Math.min(8, Math.max(0.1, zoom)) }),
     requestFit: (mode) => set((s) => ({ fitMode: mode, fitNonce: s.fitNonce + 1 })),
@@ -1319,10 +1386,20 @@ export const useStore = create<AppState>((set, get) => {
         set({ statusMsg: t(get().locale, "message.recognizeTextNoSelection") });
         return;
       }
-      await recognizeTextForAnnotations(get().currentAnnos().filter((a) => selected.has(a.id)));
+      const annotations = get().currentAnnos().filter((a) => selected.has(a.id));
+      if (get().modes[0] === "formula") {
+        await recognizeFormulaForAnnotations(annotations);
+      } else {
+        await recognizeTextForAnnotations(annotations);
+      }
     },
     recognizeAllTextBoxes: async () => {
-      await recognizeTextForAnnotations(get().currentAnnos());
+      const annotations = get().currentAnnos();
+      if (get().modes[0] === "formula") {
+        await recognizeFormulaForAnnotations(annotations);
+      } else {
+        await recognizeTextForAnnotations(annotations);
+      }
     },
 
     undo: () => {
@@ -1428,7 +1505,7 @@ export const useStore = create<AppState>((set, get) => {
         set({
           statusMsg:
             skipped > 0
-              ? `${base} · ${tt(locale, "message.regionsSkipped", { skipped })}`
+              ? `${base}, ${tt(locale, "message.regionsSkipped", { skipped })}`
               : base,
         });
       } catch (e) {
@@ -1474,7 +1551,7 @@ export const useStore = create<AppState>((set, get) => {
 
       const locale = get().locale;
       // Snapshot model/mode/device once so the whole batch uses one
-      // consistent config — a mid-run switch won't mix results.
+      // consistent config; a mid-run switch won't mix results.
       const params = snapshotPreannParams();
       set({
         busy: true,
@@ -1517,7 +1594,7 @@ export const useStore = create<AppState>((set, get) => {
         set({
           statusMsg:
             skippedTotal > 0
-              ? `${base} · ${tt(locale, "message.regionsSkipped", { skipped: skippedTotal })}`
+              ? `${base}, ${tt(locale, "message.regionsSkipped", { skipped: skippedTotal })}`
               : base,
         });
       } finally {
@@ -1538,7 +1615,7 @@ export const useStore = create<AppState>((set, get) => {
       try {
         // Determine the final status for each saved path up front and write it
         // to disk in the same pass, so disk and memory agree afterwards. Only
-        // paths that were actually saved are touched — previously every loaded
+        // paths that were actually saved are touched; previously every loaded
         // image with annotations got marked "done" even if it was only viewed.
         const annos = get().annos;
         const saved = new Set(paths);
@@ -1581,7 +1658,7 @@ export const useStore = create<AppState>((set, get) => {
         const file = await annotationFileForExport(img.path);
         // Export text-carrying annotations only: leaf text/formula/table lines
         // recognized within a region. Pure layout region parents are
-        // structural and have no transcription, so they're skipped — matching
+        // structural and have no transcription, so they're skipped, matching
         // PPOCRLabel's detection/recognition dataset purpose.
         const boxes = file.annotations
           .filter(

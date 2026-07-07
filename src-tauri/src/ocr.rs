@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(feature = "cuda")]
 use oar_ocr::core::config::OrtExecutionProvider;
 use oar_ocr::core::config::OrtSessionConfig;
+use oar_ocr::domain::structure::LayoutElementType;
 use oar_ocr::domain::tasks::layout_detection::LayoutDetectionConfig;
 use oar_ocr::domain::tasks::{TextDetectionConfig, TextRecognitionConfig};
 use oar_ocr::oarocr::{OAROCRBuilder, OAROCR};
@@ -15,6 +16,7 @@ use oar_ocr::predictors::{
     FormulaRecognitionPredictor, LayoutDetectionPredictor, TableStructureRecognitionPredictor,
     TextRecognitionPredictor,
 };
+use oar_ocr::processors::layout_sorting::{sort_layout_enhanced, SortableElement};
 use oar_ocr::processors::Point;
 use oar_ocr::utils::{get_rotate_crop_image, load_image};
 use serde::Serialize;
@@ -681,6 +683,78 @@ pub fn recognize_text_regions(
     })
 }
 
+pub fn recognize_formula_regions(
+    app: &AppHandle,
+    image_path: &str,
+    formula_key: &str,
+    device: &str,
+    regions: Vec<TextRegionInput>,
+) -> Result<TextRecognitionRegionResult, String> {
+    let requested = regions.len();
+    tracing::info!(
+        image = %image_path,
+        formula = %formula_key,
+        device = %device,
+        regions = requested,
+        "recognize formula regions"
+    );
+    let predictor = get_or_build_formula(app, formula_key, device)?;
+    let image =
+        load_image(Path::new(image_path)).map_err(|e| format!("Failed to load image: {e}"))?;
+    let mut ids = Vec::new();
+    let mut crops = Vec::new();
+    let mut skipped = 0;
+
+    for region in regions {
+        match crop_quad(&image, &region.points) {
+            Ok(crop) => {
+                ids.push(region.id);
+                crops.push(crop);
+            }
+            Err(e) => {
+                skipped += 1;
+                tracing::warn!(region_id = %region.id, error = %e, "skip invalid formula region");
+            }
+        }
+    }
+
+    if crops.is_empty() {
+        tracing::warn!(
+            regions = requested,
+            skipped,
+            "no valid formula region crops"
+        );
+        return Ok(TextRecognitionRegionResult {
+            regions: Vec::new(),
+            skipped,
+        });
+    }
+
+    let result = predictor
+        .predict(crops)
+        .map_err(|e| format!("Formula recognition failed: {e}"))?;
+    let mut out = Vec::new();
+    for (idx, id) in ids.into_iter().enumerate() {
+        let Some(text) = result.formulas.get(idx).cloned() else {
+            skipped += 1;
+            continue;
+        };
+        let score = result.scores.get(idx).copied().flatten();
+        out.push(RecognizedTextRegion { id, text, score });
+    }
+
+    tracing::info!(
+        requested,
+        recognized = out.len(),
+        skipped,
+        "formula region recognition completed"
+    );
+    Ok(TextRecognitionRegionResult {
+        regions: out,
+        skipped,
+    })
+}
+
 pub fn run_ocr(
     app: &AppHandle,
     image_path: &str,
@@ -777,12 +851,32 @@ pub fn run_layout(
     let predictor = get_or_build_layout(app, layout_key, device, tuning.and_then(|t| t.layout))?;
     let img =
         load_image(Path::new(image_path)).map_err(|e| format!("Failed to load image: {e}"))?;
+    let (page_width, page_height) = (img.width() as f32, img.height() as f32);
     let output = predictor
         .predict(vec![img])
         .map_err(|e| format!("Layout detection failed: {e}"))?;
 
     let mut out = Vec::new();
-    if let Some(elements) = output.elements.into_iter().next() {
+    if let Some(mut elements) = output.elements.into_iter().next() {
+        if !output.is_reading_order_sorted {
+            let sortable = elements
+                .iter()
+                .map(|el| SortableElement {
+                    bbox: el.bbox.clone(),
+                    element_type: LayoutElementType::from_label(&el.element_type),
+                    num_lines: None,
+                })
+                .collect::<Vec<_>>();
+            let order = sort_layout_enhanced(&sortable, page_width, page_height);
+            if order.len() == elements.len() {
+                let original = elements;
+                elements = order
+                    .into_iter()
+                    .filter_map(|idx| original.get(idx).cloned())
+                    .collect();
+            }
+        }
+
         for el in elements {
             if let Some(keys) = filter {
                 // Exact label match (case-insensitive). `contains` would let a
@@ -806,7 +900,7 @@ pub fn run_layout(
                 text: None,
                 label: Some(el.element_type.clone()),
                 score: Some(el.score),
-                order: None,
+                order: Some(out.len() as u32),
                 id: None,
                 parent_id: None,
             });

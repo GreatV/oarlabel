@@ -13,9 +13,16 @@ export function StatusBar() {
   const requestBatchCancel = useStore((st) => st.requestBatchCancel);
   const deviceLabel =
     DEVICE_OPTIONS.find((d) => d.key === s.device)?.label ?? s.device;
-  const ocrModelTitle =
-    s.modelOptions?.ocr_profiles.find((o) => o.key === s.ocrModel)?.title ??
-    s.ocrModel;
+  const activeMode = s.modes[0] ?? "ocr";
+  const activeModelTitle =
+    activeMode === "layout"
+      ? (s.modelOptions?.layout_models.find((o) => o.key === s.layoutModel)?.title ??
+        s.layoutModel)
+      : activeMode === "formula"
+        ? (s.modelOptions?.formula_profiles.find((o) => o.key === s.formulaModel)?.title ??
+          s.formulaModel)
+        : (s.modelOptions?.ocr_profiles.find((o) => o.key === s.ocrModel)?.title ??
+          s.ocrModel);
 
   return (
     <div className="grid h-8 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 border-t bg-card px-3 text-xs text-muted-foreground">
@@ -63,11 +70,11 @@ export function StatusBar() {
       <div className="flex min-w-0 justify-end gap-3">
         <span className="shrink-0">
           {t(l, "statusbar.mode")}
-          {s.modes.map((m) => modeLabel(l, m)).join(l === "zh-CN" ? "、" : " · ")}
+          {modeLabel(l, activeMode)}
         </span>
-        <span className="truncate" title={ocrModelTitle}>
+        <span className="truncate" title={activeModelTitle}>
           {t(l, "statusbar.model")}
-          {ocrModelTitle}
+          {activeModelTitle}
         </span>
         <span className="shrink-0">
           {t(l, "statusbar.device")}

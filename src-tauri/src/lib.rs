@@ -43,6 +43,14 @@ struct TextRegionRecognitionParams {
     thresholds: Option<models::InferenceTuning>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FormulaRegionRecognitionParams {
+    formula_model: String,
+    device: String,
+    regions: Vec<ocr::TextRegionInput>,
+}
+
 /// Payload for `oar:set-locale` / `oar:rebuild-menu`: the locale plus the view
 /// map used to seed the native View checkbox items at build time.
 #[derive(Deserialize)]
@@ -58,8 +66,6 @@ struct MenuPayload {
     layout_model: Option<String>,
     #[serde(default)]
     formula_model: Option<String>,
-    #[serde(default)]
-    table_model: Option<String>,
     #[serde(default)]
     device: Option<String>,
 }
@@ -84,7 +90,6 @@ fn menu_payload_to_state(p: MenuPayload) -> (String, menu::ViewState) {
             ocr_model: p.ocr_model,
             layout_model: p.layout_model,
             formula_model: p.formula_model,
-            table_model: p.table_model,
             device: p.device,
         },
     )
@@ -325,6 +330,44 @@ async fn recognize_text_regions(
 }
 
 #[tauri::command]
+async fn recognize_formula_regions(
+    app: AppHandle,
+    image_path: String,
+    params: FormulaRegionRecognitionParams,
+) -> Result<ocr::TextRecognitionRegionResult, String> {
+    let FormulaRegionRecognitionParams {
+        formula_model,
+        device,
+        regions,
+    } = params;
+    let log_image_path = image_path.clone();
+    let log_formula_model = formula_model.clone();
+    let log_device = device.clone();
+    let region_count = regions.len();
+    tracing::info!(
+        image = %log_image_path,
+        formula_model = %log_formula_model,
+        device = %log_device,
+        regions = region_count,
+        "formula region recognition started"
+    );
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        ocr::recognize_formula_regions(&app, &image_path, &formula_model, &device, regions)
+    })
+    .await
+    .map_err(|e| format!("Formula recognition task failed: {e}"))?;
+    match &result {
+        Ok(value) => tracing::info!(
+            regions = value.regions.len(),
+            skipped = value.skipped,
+            "formula region recognition finished"
+        ),
+        Err(e) => tracing::error!(error = %e, "formula region recognition failed"),
+    }
+    result
+}
+
+#[tauri::command]
 async fn export_dataset(
     images: Vec<export::ExportImage>,
     out_dir: String,
@@ -449,6 +492,7 @@ pub fn run() {
             save_custom_ocr_paths,
             preannotate,
             recognize_text_regions,
+            recognize_formula_regions,
             export_dataset,
         ])
         .run(tauri::generate_context!())
