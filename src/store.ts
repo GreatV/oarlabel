@@ -180,6 +180,7 @@ interface AppState {
   removeSelected: () => void;
   copySelection: () => void;
   paste: () => void;
+  pasteAt: (anchor?: Point) => void;
   recognizeSelectedText: () => Promise<void>;
   recognizeAllTextBoxes: () => Promise<void>;
 
@@ -1272,6 +1273,9 @@ export const useStore = create<AppState>((set, get) => {
       }
     },
     paste: () => {
+      get().pasteAt();
+    },
+    pasteAt: (anchor) => {
       const img = get().currentImage();
       // Gate on a current image: mutate() early-returns without one, which
       // would leave newIds empty and the trailing set() would write
@@ -1281,23 +1285,28 @@ export const useStore = create<AppState>((set, get) => {
       if (!img) return;
       const clip = get().clipboard;
       if (!clip.length) return;
+      const allPoints = clip.flatMap((a) => a.points);
+      const minX = Math.min(...allPoints.map((p) => p[0]));
+      const minY = Math.min(...allPoints.map((p) => p[1]));
+      const dx = anchor ? anchor[0] - minX : 8;
+      const dy = anchor ? anchor[1] - minY : 8;
       // Re-id parents first, then remap children's parentId to the new ids.
       const idMap = new Map<string, string>();
       const newIds: string[] = [];
       for (const a of clip) {
-        if (!a.parentId) idMap.set(a.id, uid());
+        idMap.set(a.id, uid());
       }
       mutate((prev) =>
         prev.concat(
           clip.map((a) => {
-            const id = a.parentId ? (idMap.get(a.parentId) ?? uid()) : idMap.get(a.id)!;
+            const id = idMap.get(a.id)!;
             newIds.push(id);
             const cloned = cloneAnno(a);
             return {
               ...cloned,
               id,
               parentId: a.parentId ? (idMap.get(a.parentId) ?? null) : null,
-              points: cloned.points.map((p) => [p[0] + 8, p[1] + 8] as Point),
+              points: cloned.points.map((p) => [p[0] + dx, p[1] + dy] as Point),
             };
           }),
         ),

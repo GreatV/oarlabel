@@ -1,4 +1,11 @@
 import Konva from "konva";
+import {
+  ClipboardPaste,
+  Copy,
+  EyeOff,
+  ScanText,
+  Trash2,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Circle,
@@ -15,9 +22,18 @@ import { fileSrc } from "@/lib/tauri";
 import { t, tt } from "@/i18n";
 import { isTextInputTarget } from "@/lib/keyboard";
 import { colorFor, usePalette, withAlpha } from "@/lib/palette";
+import { shortcut } from "@/lib/platform";
 import { useStore } from "@/store";
 import type { Annotation, FitMode, Point } from "@/types";
 import { resultReadingIndex } from "@/types";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuShortcut,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 
 function useImage(src?: string) {
   const [img, setImg] = useState<HTMLImageElement | null>(null);
@@ -103,16 +119,27 @@ export function CanvasStage() {
   const moveAnnotationTree = useStore((s) => s.moveAnnotationTree);
   const removeSelected = useStore((s) => s.removeSelected);
   const select = useStore((s) => s.select);
+  const copySelection = useStore((s) => s.copySelection);
+  const pasteAt = useStore((s) => s.pasteAt);
+  const setAnnotationHidden = useStore((s) => s.setAnnotationHidden);
+  const recognizeSelectedText = useStore((s) => s.recognizeSelectedText);
+  const clipboardCount = useStore((s) => s.clipboard.length);
+  const busy = useStore((s) => s.busy);
   const image = useImage(img ? fileSrc(img.path) : undefined);
   // Resolve palette colors (re-resolves on light/dark theme switch) so Konva,
   // which draws to <canvas> and can't read CSS var(--…), gets concrete colors.
   usePalette();
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    point: Point | null;
+    annotationId: string | null;
+  }>({ point: null, annotationId: null });
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const activePathRef = useRef<string | null>(null);
+  const prevSizeRef = useRef({ w: 0, h: 0 });
   const autoFitModeRef = useRef<FitMode | null>("window");
   // Track the origin of the last zoom change so the re-anchor effect only runs
   // for keyboard / external zoom edits, not for wheel or fit (which set their
@@ -138,6 +165,10 @@ export function CanvasStage() {
     draftPoly.length >= 3 &&
     !!cursor &&
     Math.hypot(draftPoly[0][0] - cursor[0], draftPoly[0][1] - cursor[1]) * zoom <= 22;
+  const contextAnnotation = contextMenu.annotationId
+    ? annos.find((a) => a.id === contextMenu.annotationId)
+    : null;
+  const hasSelection = selectedIds.length > 0;
 
   // Clear any in-progress rectangle/polygon when the displayed image changes,
   // otherwise a half-drawn polygon carries over onto the next image and closes
@@ -240,6 +271,35 @@ export function CanvasStage() {
     return e.target === e.target.getStage() || name === "bg";
   };
 
+  const contextPointFromEvent = (
+    e: Konva.KonvaEventObject<MouseEvent | PointerEvent>,
+  ): Point | null => {
+    const stage = e.target.getStage();
+    const pointer = stage?.getPointerPosition();
+    if (!pointer) return null;
+    return toImage(pointer.x, pointer.y);
+  };
+
+  const handleStageContextMenu = (e: Konva.KonvaEventObject<PointerEvent>) => {
+    if (!isBackground(e)) return;
+    setContextMenu({
+      point: contextPointFromEvent(e),
+      annotationId: null,
+    });
+  };
+
+  const handleAnnotationContextMenu = (
+    anno: Annotation,
+    e: Konva.KonvaEventObject<PointerEvent>,
+  ) => {
+    e.cancelBubble = true;
+    if (!selectedIds.includes(anno.id)) select(anno.id);
+    setContextMenu({
+      point: contextPointFromEvent(e),
+      annotationId: anno.id,
+    });
+  };
+
   // Cursor-anchored zoom: keep the image point under the pointer fixed as the
   // scale changes, so the view zooms toward the cursor instead of jumping.
   // The math is the inverse of toImage(): given screen pointer s and pan p,
@@ -247,6 +307,7 @@ export function CanvasStage() {
   const handleWheel = useCallback(
     (e: Konva.KonvaEventObject<WheelEvent>) => {
       if (!image || !size.w || !size.h) return;
+      if (!e.evt.ctrlKey && !e.evt.metaKey) return;
       const stage = e.target.getStage();
       const pointer = stage?.getPointerPosition();
       if (!pointer) return;
@@ -264,6 +325,23 @@ export function CanvasStage() {
     },
     [image, pan.x, pan.y, size.h, size.w, zoom],
   );
+
+  useEffect(() => {
+    const prev = prevSizeRef.current;
+    prevSizeRef.current = { w: size.w, h: size.h };
+    if (!image || !prev.w || !prev.h || !size.w || !size.h) return;
+    if (prev.w === size.w && prev.h === size.h) return;
+    if (autoFitModeRef.current) return;
+
+    setPan((current) => {
+      const imageCenterX = (prev.w / 2 - current.x) / zoom;
+      const imageCenterY = (prev.h / 2 - current.y) / zoom;
+      return {
+        x: size.w / 2 - imageCenterX * zoom,
+        y: size.h / 2 - imageCenterY * zoom,
+      };
+    });
+  }, [image, size.h, size.w, zoom]);
 
   // When zoom changes from outside the wheel handler (keyboard Ctrl+=/-, the
   // View menu, or fit), re-anchor pan to the viewport center so the image
@@ -566,13 +644,15 @@ export function CanvasStage() {
   };
 
   return (
-    <div
-      ref={containerRef}
-      className="relative h-full w-full overflow-hidden bg-canvas"
-      style={{
-        cursor: tool === "rect" || tool === "polygon" ? "crosshair" : "default",
-      }}
-    >
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div
+          ref={containerRef}
+          className="relative h-full w-full overflow-hidden bg-canvas"
+          style={{
+            cursor: tool === "rect" || tool === "polygon" ? "crosshair" : "default",
+          }}
+        >
       {!img && (
         <div className="flex h-full items-center justify-center p-6 text-center">
           <div className="rounded-md border border-dashed bg-card/70 px-5 py-4 text-sm text-muted-foreground">
@@ -594,6 +674,7 @@ export function CanvasStage() {
           onMouseUp={handleMouseUp}
           onWheel={handleWheel}
           onClick={handleStageClick}
+          onContextMenu={handleStageContextMenu}
           onDragEnd={(e) => {
             // only the stage itself updates pan
             if (e.target === e.target.getStage()) {
@@ -696,6 +777,7 @@ export function CanvasStage() {
                     }
                   }}
                   onMouseEnter={() => setHoveredId(a.id)}
+                  onContextMenu={(e) => handleAnnotationContextMenu(a, e)}
                   onMouseLeave={() =>
                     setHoveredId((cur) => (cur === a.id ? null : cur))
                   }
@@ -800,6 +882,61 @@ export function CanvasStage() {
           </Layer>
         </Stage>
       )}
-    </div>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="min-w-[13rem]">
+        <ContextMenuItem
+          disabled={!hasSelection}
+          onClick={() => {
+            if (hasSelection) copySelection();
+          }}
+        >
+          <Copy className="h-4 w-4 text-muted-foreground" />
+          {t(locale, "menu.edit.copy")}
+          <ContextMenuShortcut>{shortcut("Ctrl+C")}</ContextMenuShortcut>
+        </ContextMenuItem>
+        <ContextMenuItem
+          disabled={!clipboardCount || !contextMenu.point}
+          onClick={() => {
+            if (contextMenu.point) pasteAt(contextMenu.point);
+          }}
+        >
+          <ClipboardPaste className="h-4 w-4 text-muted-foreground" />
+          {t(locale, "menu.edit.paste")}
+          <ContextMenuShortcut>{shortcut("Ctrl+V")}</ContextMenuShortcut>
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          disabled={!hasSelection || busy}
+          onClick={() => {
+            if (hasSelection) void recognizeSelectedText();
+          }}
+        >
+          <ScanText className="h-4 w-4 text-muted-foreground" />
+          {t(locale, "canvas.context.recognize")}
+        </ContextMenuItem>
+        <ContextMenuItem
+          disabled={!contextAnnotation}
+          onClick={() => {
+            if (contextAnnotation) {
+              setAnnotationHidden(contextAnnotation.id, true);
+            }
+          }}
+        >
+          <EyeOff className="h-4 w-4 text-muted-foreground" />
+          {t(locale, "canvas.context.hide")}
+        </ContextMenuItem>
+        <ContextMenuItem
+          disabled={!hasSelection}
+          onClick={() => {
+            if (hasSelection) removeSelected();
+          }}
+        >
+          <Trash2 className="h-4 w-4 text-muted-foreground" />
+          {t(locale, "toolbar.delete")}
+          <ContextMenuShortcut>Del</ContextMenuShortcut>
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }

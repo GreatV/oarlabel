@@ -112,6 +112,8 @@
   "fileList.emptyTitle": "还没有图片",
   "fileList.empty": "打开一个文件夹以载入图片",
   "canvas.empty": "请打开文件夹并选择图片",
+  "canvas.context.hide": "隐藏",
+  "canvas.context.recognize": "识别",
 
   "results.title.generic": "标注结果",
   "results.title.ocr": "文本内容",

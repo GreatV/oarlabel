@@ -112,6 +112,8 @@
   "fileList.emptyTitle": "No images yet",
   "fileList.empty": "Open a folder to load images",
   "canvas.empty": "Open a folder and select an image",
+  "canvas.context.hide": "Hide",
+  "canvas.context.recognize": "Recognize",
 
   "results.title.generic": "Annotations",
   "results.title.ocr": "Text Results",
