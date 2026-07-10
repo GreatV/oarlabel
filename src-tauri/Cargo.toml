@@ -29,14 +29,13 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # OCR / image processing
-oar-ocr = { path = "../../oar-ocr", features = ["auto-download"] }
+oar-ocr = { version = "0.8.0", features = ["auto-download"] }
 image = "0.25"
 
 # PDF rendering (pure Rust) for "import PDF"

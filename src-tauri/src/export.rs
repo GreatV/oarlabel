@@ -5,10 +5,11 @@
 //! - Recognition: `rec_gt.txt` (`crop_img/xxx.jpg\ttext`) plus a `crop_img/`
 //!   folder of perspective-cropped text line images.
 
-use image::{Rgb, RgbImage};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
+
+use crate::geometry;
 
 #[derive(Deserialize)]
 pub struct ExportBox {
@@ -86,7 +87,8 @@ pub fn export_recognition(images: &[ExportImage], out_dir: &str) -> Result<Strin
             if text.is_empty() {
                 continue;
             }
-            let crop = crop_quad(&src, &b.points);
+            let crop = geometry::crop_quad(&src, &b.points)
+                .map_err(|e| format!("Failed to crop image {}: {e}", img.path))?;
             let name = format!("img_{:06}.jpg", counter);
             counter += 1;
             crop.save(crop_dir.join(&name))
@@ -121,12 +123,6 @@ fn sanitize_rec_text(s: &str) -> String {
     out.trim().to_string()
 }
 
-// ---- geometry helpers -----------------------------------------------------
-
-fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
-    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
-}
-
 fn unique_export_name(path: &Path, used: &mut HashSet<String>) -> String {
     let stem = path
         .file_stem()
@@ -141,110 +137,14 @@ fn unique_export_name(path: &Path, used: &mut HashSet<String>) -> String {
         } else {
             format!("{stem}_{idx}.{ext}")
         };
-        if used.insert(name.clone()) {
+        // Most macOS and Windows volumes are case-insensitive. Reserve a
+        // normalized key so `scan.JPG` and `scan.jpg` cannot overwrite each
+        // other even though their source spellings differ.
+        if used.insert(name.to_lowercase()) {
             return name;
         }
         idx += 1;
     }
-}
-
-fn lerp(a: [f32; 2], b: [f32; 2], t: f32) -> [f32; 2] {
-    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
-}
-
-/// Order an arbitrary set of polygon points into TL, TR, BR, BL. For non-quad
-/// polygons we fall back to the axis-aligned bounding rectangle.
-fn order_quad(points: &[[f32; 2]]) -> [[f32; 2]; 4] {
-    if points.len() == 4 {
-        // Classic sum/diff ordering: TL has min(x+y), BR max(x+y);
-        // TR has min(y-x), BL max(y-x).
-        let mut tl = points[0];
-        let mut br = points[0];
-        let mut tr = points[0];
-        let mut bl = points[0];
-        let (mut min_sum, mut max_sum) = (f32::INFINITY, f32::NEG_INFINITY);
-        let (mut min_diff, mut max_diff) = (f32::INFINITY, f32::NEG_INFINITY);
-        for &p in points {
-            let sum = p[0] + p[1];
-            let diff = p[1] - p[0];
-            if sum < min_sum {
-                min_sum = sum;
-                tl = p;
-            }
-            if sum > max_sum {
-                max_sum = sum;
-                br = p;
-            }
-            if diff < min_diff {
-                min_diff = diff;
-                tr = p;
-            }
-            if diff > max_diff {
-                max_diff = diff;
-                bl = p;
-            }
-        }
-        [tl, tr, br, bl]
-    } else {
-        let xs = points.iter().map(|p| p[0]);
-        let ys = points.iter().map(|p| p[1]);
-        let x0 = xs.clone().fold(f32::INFINITY, f32::min);
-        let x1 = xs.fold(f32::NEG_INFINITY, f32::max);
-        let y0 = ys.clone().fold(f32::INFINITY, f32::min);
-        let y1 = ys.fold(f32::NEG_INFINITY, f32::max);
-        [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
-    }
-}
-
-fn sample_bilinear(src: &RgbImage, x: f32, y: f32) -> Rgb<u8> {
-    let (w, h) = (src.width() as i32, src.height() as i32);
-    if w == 0 || h == 0 {
-        return Rgb([255, 255, 255]);
-    }
-    let x = x.clamp(0.0, (w - 1) as f32);
-    let y = y.clamp(0.0, (h - 1) as f32);
-    let x0 = x.floor() as i32;
-    let y0 = y.floor() as i32;
-    let x1 = (x0 + 1).min(w - 1);
-    let y1 = (y0 + 1).min(h - 1);
-    let fx = x - x0 as f32;
-    let fy = y - y0 as f32;
-
-    let p = |px: i32, py: i32| src.get_pixel(px as u32, py as u32).0;
-    let p00 = p(x0, y0);
-    let p10 = p(x1, y0);
-    let p01 = p(x0, y1);
-    let p11 = p(x1, y1);
-
-    let mut out = [0u8; 3];
-    for c in 0..3 {
-        let top = p00[c] as f32 * (1.0 - fx) + p10[c] as f32 * fx;
-        let bot = p01[c] as f32 * (1.0 - fx) + p11[c] as f32 * fx;
-        out[c] = (top * (1.0 - fy) + bot * fy).round().clamp(0.0, 255.0) as u8;
-    }
-    Rgb(out)
-}
-
-/// PaddleOCR-style rotate-crop: map a (possibly rotated) quadrilateral to an
-/// axis-aligned crop using bilinear sampling along the quad's edges.
-fn crop_quad(src: &RgbImage, points: &[[f32; 2]]) -> RgbImage {
-    let [tl, tr, br, bl] = order_quad(points);
-
-    let w = dist(tr, tl).max(dist(br, bl)).round().max(1.0) as u32;
-    let h = dist(bl, tl).max(dist(br, tr)).round().max(1.0) as u32;
-
-    let mut dst = RgbImage::new(w, h);
-    for y in 0..h {
-        let v = (y as f32 + 0.5) / h as f32;
-        for x in 0..w {
-            let u = (x as f32 + 0.5) / w as f32;
-            let top = lerp(tl, tr, u);
-            let bot = lerp(bl, br, u);
-            let s = lerp(top, bot, v);
-            dst.put_pixel(x, y, sample_bilinear(src, s[0], s[1]));
-        }
-    }
-    dst
 }
 
 #[cfg(test)]
@@ -271,24 +171,9 @@ mod tests {
             unique_export_name(Path::new("other/scan.jpg"), &mut used),
             "scan_1.jpg"
         );
-    }
-
-    #[test]
-    fn order_quad_normalizes_unordered_points() {
-        let ordered = order_quad(&[[10.0, 10.0], [0.0, 0.0], [0.0, 10.0], [10.0, 0.0]]);
-
         assert_eq!(
-            ordered,
-            [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]
+            unique_export_name(Path::new("other/SCAN.JPG"), &mut used),
+            "SCAN_2.JPG"
         );
-    }
-
-    #[test]
-    fn crop_quad_returns_stable_minimum_size() {
-        let src = RgbImage::from_pixel(2, 2, Rgb([12, 34, 56]));
-        let crop = crop_quad(&src, &[[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]);
-
-        assert_eq!((crop.width(), crop.height()), (1, 1));
-        assert_eq!(crop.get_pixel(0, 0), &Rgb([12, 34, 56]));
     }
 }

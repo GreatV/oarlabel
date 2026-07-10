@@ -44,11 +44,6 @@ export interface Annotation {
    *  it so render/edit code does not have to infer shape on every frame. */
   shape?: AnnotationShape;
   results: AnnotationResult[];
-  /** Parent region id for a child annotation produced by the structured
-   *  pipeline, or null/undefined for a top-level (region or manual) box.
-   *  Optional so v1 on-disk files (which never carried it) load fine as
-   *  top-level annotations. */
-  parentId?: string | null;
 }
 
 export interface ImageAnnotationFile {
@@ -62,15 +57,6 @@ export interface PreannBox {
   text: string | null;
   label: string | null;
   score: number | null;
-  /** Reading-order position (0-based), when the active pipeline can provide or compute it. */
-  order?: number | null;
-  /** Stable region id (snake_case on the wire from Rust serde). Only set by
-   *  the structured pipeline on layout-detected region boxes, so children can
-   *  reference them via `parent_id`. */
-  id?: string | null;
-  /** Parent region id (snake_case on the wire). Only set by children produced
-   *  inside the structured pipeline. Mapped to `Annotation.parentId`. */
-  parent_id?: string | null;
 }
 
 /** Result of a pre-annotation pass: successful boxes plus a count of regions
@@ -116,7 +102,6 @@ export interface ModelOptions {
   ocr_profiles: ModelOption[];
   layout_models: ModelOption[];
   formula_profiles: ModelOption[];
-  table_profiles: ModelOption[];
 }
 
 export interface CustomOcrPaths {
@@ -147,7 +132,12 @@ export interface InferenceTuning {
   layout?: LayoutDetectionTuning;
 }
 
-export type Device = "auto" | "cpu" | "cuda";
+export type Device = "cpu" | "cuda";
+
+export interface DeviceOption {
+  key: Device;
+  label: string;
+}
 
 export interface ViewOptions {
   fileList: boolean;
@@ -174,21 +164,11 @@ export const VIEW_KEYS: (keyof ViewOptions)[] = [
 
 export type FitMode = "window" | "width" | "actual";
 
-export const DEVICE_OPTIONS: { key: Device; label: string }[] = [
-  { key: "auto", label: "Auto" },
-  { key: "cpu", label: "CPU" },
-  { key: "cuda", label: "CUDA" },
-];
+export const DEFAULT_DEVICE_OPTIONS: DeviceOption[] = [{ key: "cpu", label: "CPU" }];
 
 export function resultText(a: Annotation): string {
   const text = a.results.find((r) => r.task === "text_recognition")?.value.text;
   return typeof text === "string" ? text : "";
-}
-
-/** Reading-order index, if the annotation carries one. */
-export function resultReadingIndex(a: Annotation): number | undefined {
-  const idx = a.results.find((r) => r.task === "reading_order")?.value.index;
-  return typeof idx === "number" ? idx : undefined;
 }
 
 export function resultLabel(a: Annotation): string | undefined {

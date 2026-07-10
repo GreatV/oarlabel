@@ -702,56 +702,6 @@
       "source": "GitHubRelease"
     },
     {
-      "key": "table_slanet",
-      "filename": "slanet.onnx",
-      "size_label": "7.4 MB",
-      "title": "SLANet",
-      "bundled": false,
-      "kind": "TableStructure",
-      "pipeline_name": "SLANet",
-      "source": "GitHubRelease"
-    },
-    {
-      "key": "table_slanet_plus",
-      "filename": "slanet_plus.onnx",
-      "size_label": "7.4 MB",
-      "title": "SLANet Plus",
-      "bundled": false,
-      "kind": "TableStructure",
-      "pipeline_name": "SLANet_plus",
-      "source": "GitHubRelease"
-    },
-    {
-      "key": "table_slanext_wired",
-      "filename": "slanext_wired.onnx",
-      "size_label": "350.7 MB",
-      "title": "SLANeXt Wired",
-      "bundled": false,
-      "kind": "TableStructure",
-      "pipeline_name": "SLANeXt_wired",
-      "source": "GitHubRelease"
-    },
-    {
-      "key": "table_slanext_wireless",
-      "filename": "slanext_wireless.onnx",
-      "size_label": "350.7 MB",
-      "title": "SLANeXt Wireless",
-      "bundled": false,
-      "kind": "TableStructure",
-      "pipeline_name": "SLANeXt_wireless",
-      "source": "GitHubRelease"
-    },
-    {
-      "key": "table_structure_dict_ch",
-      "filename": "table_structure_dict_ch.txt",
-      "size_label": "-",
-      "title": "Table Structure Dictionary",
-      "bundled": false,
-      "kind": "TableDict",
-      "pipeline_name": null,
-      "source": "GitHubRelease"
-    },
-    {
       "key": "ppocrv6_tiny_dict",
       "filename": "ppocrv6_tiny_dict.txt",
       "size_label": "27 KB",
@@ -785,16 +735,6 @@
         "nms_threshold": 0.5,
         "max_elements": 100
       }
-    },
-    {
-      "key": "table_slanet_plus_v2",
-      "filename": "slanet_plus_v2.onnx",
-      "size_label": "7.4 MB",
-      "title": "SLANet Plus v2",
-      "bundled": false,
-      "kind": "TableStructure",
-      "pipeline_name": "SLANet_plus",
-      "source": "ModelScope"
     }
   ],
   "ocr_profiles": [
@@ -1126,43 +1066,6 @@
       "model": "formula_unimernet",
       "tokenizer": "formula_unimernet_tokenizer",
       "model_name": "UniMERNet"
-    }
-  ],
-  "table_profiles": [
-    {
-      "key": "slanet",
-      "title": "SLANet",
-      "structure": "table_slanet",
-      "dict": "table_structure_dict_ch",
-      "model_name": "SLANet"
-    },
-    {
-      "key": "slanet_plus",
-      "title": "SLANet Plus",
-      "structure": "table_slanet_plus",
-      "dict": "table_structure_dict_ch",
-      "model_name": "SLANet_plus"
-    },
-    {
-      "key": "slanet_plus_v2",
-      "title": "SLANet Plus v2",
-      "structure": "table_slanet_plus_v2",
-      "dict": "table_structure_dict_ch",
-      "model_name": "SLANet_plus"
-    },
-    {
-      "key": "slanext_wired",
-      "title": "SLANeXt Wired",
-      "structure": "table_slanext_wired",
-      "dict": "table_structure_dict_ch",
-      "model_name": "SLANeXt_wired"
-    },
-    {
-      "key": "slanext_wireless",
-      "title": "SLANeXt Wireless",
-      "structure": "table_slanext_wireless",
-      "dict": "table_structure_dict_ch",
-      "model_name": "SLANeXt_wireless"
     }
   ]
 }

@@ -36,8 +36,6 @@ pub enum ModelKind {
     Layout,
     Formula,
     FormulaTokenizer,
-    TableStructure,
-    TableDict,
 }
 
 impl ModelKind {
@@ -50,8 +48,6 @@ impl ModelKind {
             ModelKind::Layout => "layout",
             ModelKind::Formula => "formula",
             ModelKind::FormulaTokenizer => "formula_tokenizer",
-            ModelKind::TableStructure => "table_structure",
-            ModelKind::TableDict => "table_dict",
         }
     }
 }
@@ -143,15 +139,6 @@ pub struct FormulaProfile {
     pub model_name: String,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-pub struct TableProfile {
-    pub key: String,
-    pub title: String,
-    pub structure: String,
-    pub dict: String,
-    pub model_name: String,
-}
-
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomOcrPaths {
@@ -196,7 +183,6 @@ pub struct ModelConfig {
     pub models: Vec<ModelDef>,
     pub ocr_profiles: Vec<OcrProfile>,
     pub formula_profiles: Vec<FormulaProfile>,
-    pub table_profiles: Vec<TableProfile>,
 }
 
 #[derive(Serialize)]
@@ -210,7 +196,6 @@ pub struct ModelOptions {
     pub ocr_profiles: Vec<ModelOption>,
     pub layout_models: Vec<ModelOption>,
     pub formula_profiles: Vec<ModelOption>,
-    pub table_profiles: Vec<ModelOption>,
 }
 
 impl ModelConfig {
@@ -256,10 +241,6 @@ impl ModelConfig {
         for p in &self.formula_profiles {
             require_model(&keys, &p.model, &p.key)?;
             require_model(&keys, &p.tokenizer, &p.key)?;
-        }
-        for p in &self.table_profiles {
-            require_model(&keys, &p.structure, &p.key)?;
-            require_model(&keys, &p.dict, &p.key)?;
         }
         Ok(())
     }
@@ -458,14 +439,6 @@ pub fn formula_profile(app: &AppHandle, key: &str) -> Result<FormulaProfile, Str
         .ok_or_else(|| format!("Unknown formula recognition model: {key}"))
 }
 
-pub fn table_profile(app: &AppHandle, key: &str) -> Result<TableProfile, String> {
-    config(app)?
-        .table_profiles
-        .into_iter()
-        .find(|p| p.key == key)
-        .ok_or_else(|| format!("Unknown table recognition model: {key}"))
-}
-
 pub fn def(app: &AppHandle, key: &str) -> Result<ModelDef, String> {
     config(app)?
         .models
@@ -564,14 +537,6 @@ pub fn options(app: &AppHandle) -> Result<ModelOptions, String> {
             .collect(),
         formula_profiles: cfg
             .formula_profiles
-            .iter()
-            .map(|p| ModelOption {
-                key: p.key.clone(),
-                title: p.title.clone(),
-            })
-            .collect(),
-        table_profiles: cfg
-            .table_profiles
             .iter()
             .map(|p| ModelOption {
                 key: p.key.clone(),

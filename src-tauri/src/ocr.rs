@@ -1,11 +1,13 @@
 //! OCR / layout inference. Pipelines are expensive to build, so each selected
 //! model/device pair is built once and cached.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", not(target_os = "macos")))]
 use oar_ocr::core::config::OrtExecutionProvider;
 use oar_ocr::core::config::OrtSessionConfig;
 use oar_ocr::domain::structure::LayoutElementType;
@@ -13,16 +15,67 @@ use oar_ocr::domain::tasks::layout_detection::LayoutDetectionConfig;
 use oar_ocr::domain::tasks::{TextDetectionConfig, TextRecognitionConfig};
 use oar_ocr::oarocr::{OAROCRBuilder, OAROCR};
 use oar_ocr::predictors::{
-    FormulaRecognitionPredictor, LayoutDetectionPredictor, TableStructureRecognitionPredictor,
-    TextRecognitionPredictor,
+    FormulaRecognitionPredictor, LayoutDetectionPredictor, TextRecognitionPredictor,
 };
 use oar_ocr::processors::layout_sorting::{sort_layout_enhanced, SortableElement};
-use oar_ocr::processors::Point;
-use oar_ocr::utils::{get_rotate_crop_image, load_image};
+use oar_ocr::utils::load_image;
 use serde::Serialize;
 use tauri::AppHandle;
 
-use crate::models;
+use crate::{geometry, models};
+
+static PREANNOTATION_CANCEL_GENERATION: AtomicU64 = AtomicU64::new(0);
+const PREANNOTATION_CANCELLED_ERROR: &str = "Pre-annotation cancelled";
+
+thread_local! {
+    static PREANNOTATION_RUN_GENERATION: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+pub fn begin_preannotation_run() {
+    let generation = PREANNOTATION_CANCEL_GENERATION.load(Ordering::Acquire);
+    PREANNOTATION_RUN_GENERATION.set(Some(generation));
+}
+
+pub fn finish_preannotation_run() {
+    PREANNOTATION_RUN_GENERATION.set(None);
+}
+
+pub fn request_preannotation_cancel() {
+    PREANNOTATION_CANCEL_GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
+fn check_preannotation_cancelled() -> Result<(), String> {
+    let current = PREANNOTATION_CANCEL_GENERATION.load(Ordering::Acquire);
+    let cancelled = PREANNOTATION_RUN_GENERATION
+        .get()
+        .is_some_and(|generation| generation != current);
+    if cancelled {
+        Err(PREANNOTATION_CANCELLED_ERROR.into())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::{
+        begin_preannotation_run, check_preannotation_cancelled, finish_preannotation_run,
+        request_preannotation_cancel,
+    };
+
+    #[test]
+    fn cancellation_only_affects_runs_started_before_the_request() {
+        begin_preannotation_run();
+        assert!(check_preannotation_cancelled().is_ok());
+
+        request_preannotation_cancel();
+        assert!(check_preannotation_cancelled().is_err());
+
+        begin_preannotation_run();
+        assert!(check_preannotation_cancelled().is_ok());
+        finish_preannotation_run();
+    }
+}
 
 fn resolve_model_path(app: &AppHandle, key: &str, role: &str) -> Result<PathBuf, String> {
     let def = models::def(app, key)?;
@@ -86,19 +139,6 @@ pub struct PreannBox {
     pub text: Option<String>,
     pub label: Option<String>,
     pub score: Option<f32>,
-    /// Reading-order position (0-based). Only set by reading-order mode; None
-    /// for OCR / layout / formula / table runs.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub order: Option<u32>,
-    /// Stable region id. Only set by the structured pipeline (`run_structure`)
-    /// on layout-detected region boxes, so children can reference them via
-    /// `parent_id`. None for the single-mode runs.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    /// Parent region id. Only set by children produced inside `run_structure`
-    /// (text/formula/table lines recognized within a region). None otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_id: Option<String>,
 }
 
 /// Result of a pre-annotation pass: the successful boxes plus a count of
@@ -141,8 +181,6 @@ static TEXT_RECOGNITION: OnceLock<Mutex<HashMap<String, Arc<TextRecognitionPredi
 static LAYOUT: OnceLock<Mutex<HashMap<String, Arc<LayoutDetectionPredictor>>>> = OnceLock::new();
 static FORMULA: OnceLock<Mutex<HashMap<String, Arc<FormulaRecognitionPredictor>>>> =
     OnceLock::new();
-static TABLE: OnceLock<Mutex<HashMap<String, Arc<TableStructureRecognitionPredictor>>>> =
-    OnceLock::new();
 
 fn ort_config_for(device: &str) -> Result<Option<OrtSessionConfig>, String> {
     let d = device.to_lowercase();
@@ -150,7 +188,7 @@ fn ort_config_for(device: &str) -> Result<Option<OrtSessionConfig>, String> {
         return Ok(None);
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", not(target_os = "macos")))]
     {
         if d.starts_with("cuda") {
             let device_id = if d == "cuda" {
@@ -177,18 +215,23 @@ fn ort_config_for(device: &str) -> Result<Option<OrtSessionConfig>, String> {
         }
     }
 
-    #[cfg(not(feature = "cuda"))]
+    #[cfg(not(all(feature = "cuda", not(target_os = "macos"))))]
     {
         if d.starts_with("cuda") {
             return Err(
-                "CUDA was selected, but this build does not enable CUDA support. Use CPU or rebuild with `cargo build --features cuda`."
+                "CUDA was selected, but this platform/build does not enable CUDA support. Use CPU."
                     .into(),
             );
         }
     }
 
+    let supported = if cfg!(all(feature = "cuda", not(target_os = "macos"))) {
+        "cpu / cuda"
+    } else {
+        "cpu"
+    };
     Err(format!(
-        "Unsupported device: {device}; supported values are cpu / auto"
+        "Unsupported device: {device}; supported values are {supported}"
     ))
 }
 
@@ -256,9 +299,8 @@ fn get_or_build_ocr(
     if let Some(existing) = guard.get(&cache_key) {
         return Ok(existing.clone());
     }
-    // Keep only the most recently built pipeline: a single formula/table model
-    // can weigh 200MB–1.7GB, so otherwise switching models just accumulates
-    // memory that is never released.
+    // Keep only the most recently built pipeline so switching models does not
+    // accumulate large inference sessions that are never released.
     guard.clear();
     guard.insert(cache_key, arc.clone());
     Ok(arc)
@@ -415,170 +457,6 @@ fn get_or_build_formula(
     Ok(arc)
 }
 
-fn get_or_build_table(
-    app: &AppHandle,
-    table_key: &str,
-    device: &str,
-) -> Result<Arc<TableStructureRecognitionPredictor>, String> {
-    let cache_key = format!("{table_key}|{device}");
-    let cell = TABLE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(existing) = cell
-        .lock()
-        .map_err(|e| e.to_string())?
-        .get(&cache_key)
-        .cloned()
-    {
-        return Ok(existing.clone());
-    }
-
-    let prof = models::table_profile(app, table_key)?;
-    let model = resolve_model_path(app, &prof.structure, "table recognition model")?;
-    let dict = resolve_model_path(app, &prof.dict, "table structure dictionary")?;
-
-    let mut builder = TableStructureRecognitionPredictor::builder()
-        .model_name(&prof.model_name)
-        .dict_path(&dict);
-    if let Some(cfg) = ort_config_for(device)? {
-        builder = builder.with_ort_config(cfg);
-    }
-    let predictor = builder
-        .build(&model)
-        .map_err(|e| format!("Failed to build table recognizer: {e}"))?;
-    let arc = Arc::new(predictor);
-    let mut guard = cell.lock().map_err(|e| e.to_string())?;
-    if let Some(existing) = guard.get(&cache_key) {
-        return Ok(existing.clone());
-    }
-    guard.clear();
-    guard.insert(cache_key, arc.clone());
-    Ok(arc)
-}
-
-/// Crop an axis-aligned region from the image. Returns the crop plus its
-/// top-left origin `(x0, y0)` in image coordinates, so callers that run a
-/// recognizer on the crop (OCR) can map detected boxes back into image space.
-fn crop_region(
-    image: &image::RgbImage,
-    points: &[[f32; 2]],
-) -> Result<(image::RgbImage, (u32, u32)), String> {
-    // Callers (run_formula / run_table / run_structure) only pass regions from
-    // run_layout, which already drops empty-point boxes, so points is non-empty
-    // here; the degenerate-case check below also catches an empty slice.
-    let x_min = points.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
-    let y_min = points.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
-    let x_max = points
-        .iter()
-        .map(|p| p[0])
-        .fold(f32::NEG_INFINITY, f32::max);
-    let y_max = points
-        .iter()
-        .map(|p| p[1])
-        .fold(f32::NEG_INFINITY, f32::max);
-    if !x_min.is_finite()
-        || !y_min.is_finite()
-        || !x_max.is_finite()
-        || !y_max.is_finite()
-        || x_max <= x_min
-        || y_max <= y_min
-    {
-        return Err("Invalid recognition region coordinates".into());
-    }
-
-    let image_width = image.width() as f32;
-    let image_height = image.height() as f32;
-    let x0 = x_min.floor().clamp(0.0, image_width) as u32;
-    let y0 = y_min.floor().clamp(0.0, image_height) as u32;
-    let x1 = x_max.ceil().clamp(0.0, image_width) as u32;
-    let y1 = y_max.ceil().clamp(0.0, image_height) as u32;
-    if x1 <= x0 || y1 <= y0 {
-        return Err("Recognition region is outside the image bounds".into());
-    }
-
-    let crop = image::imageops::crop_imm(image, x0, y0, x1 - x0, y1 - y0).to_image();
-    Ok((crop, (x0, y0)))
-}
-
-fn point_dist(a: [f32; 2], b: [f32; 2]) -> f32 {
-    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
-}
-
-fn order_quad(points: &[[f32; 2]]) -> [[f32; 2]; 4] {
-    if points.len() == 4 {
-        let mut tl = points[0];
-        let mut br = points[0];
-        let mut tr = points[0];
-        let mut bl = points[0];
-        let (mut min_sum, mut max_sum) = (f32::INFINITY, f32::NEG_INFINITY);
-        let (mut min_diff, mut max_diff) = (f32::INFINITY, f32::NEG_INFINITY);
-        for &p in points {
-            let sum = p[0] + p[1];
-            let diff = p[1] - p[0];
-            if sum < min_sum {
-                min_sum = sum;
-                tl = p;
-            }
-            if sum > max_sum {
-                max_sum = sum;
-                br = p;
-            }
-            if diff < min_diff {
-                min_diff = diff;
-                tr = p;
-            }
-            if diff > max_diff {
-                max_diff = diff;
-                bl = p;
-            }
-        }
-        [tl, tr, br, bl]
-    } else {
-        let xs = points.iter().map(|p| p[0]);
-        let ys = points.iter().map(|p| p[1]);
-        let x0 = xs.clone().fold(f32::INFINITY, f32::min);
-        let x1 = xs.fold(f32::NEG_INFINITY, f32::max);
-        let y0 = ys.clone().fold(f32::INFINITY, f32::min);
-        let y1 = ys.fold(f32::NEG_INFINITY, f32::max);
-        [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
-    }
-}
-
-fn is_vertical_quad(points: &[[f32; 2]]) -> bool {
-    if points.is_empty() {
-        return false;
-    }
-    let [tl, tr, br, bl] = order_quad(points);
-    if ![tl, tr, br, bl]
-        .iter()
-        .all(|p| p[0].is_finite() && p[1].is_finite())
-    {
-        return false;
-    }
-
-    let w = point_dist(tl, tr).max(point_dist(bl, br));
-    let h = point_dist(tl, bl).max(point_dist(tr, br));
-    h >= w * 1.2
-}
-
-fn crop_quad(src: &image::RgbImage, points: &[[f32; 2]]) -> Result<image::RgbImage, String> {
-    if points.is_empty() {
-        return Err("Invalid recognition region coordinates".into());
-    }
-    let [tl, tr, br, bl] = order_quad(points);
-    if ![tl, tr, br, bl]
-        .iter()
-        .all(|p| p[0].is_finite() && p[1].is_finite())
-    {
-        return Err("Invalid recognition region coordinates".into());
-    }
-
-    let box_points = [tl, tr, br, bl]
-        .into_iter()
-        .map(|p| Point::new(p[0], p[1]))
-        .collect::<Vec<_>>();
-    get_rotate_crop_image(src, &box_points)
-        .map_err(|e| format!("Failed to crop recognition region: {e}"))
-}
-
 pub fn recognize_text_regions(
     app: &AppHandle,
     image_path: &str,
@@ -609,8 +487,8 @@ pub fn recognize_text_regions(
     let mut skipped = 0;
 
     for region in regions {
-        let should_try_vertical = is_vertical_quad(&region.points);
-        match crop_quad(&image, &region.points) {
+        let should_try_vertical = geometry::is_vertical_quad(&region.points);
+        match geometry::crop_quad(&image, &region.points) {
             Ok(crop) => {
                 let region_idx = ids.len();
                 ids.push(region.id);
@@ -706,7 +584,7 @@ pub fn recognize_formula_regions(
     let mut skipped = 0;
 
     for region in regions {
-        match crop_quad(&image, &region.points) {
+        match geometry::crop_quad(&image, &region.points) {
             Ok(crop) => {
                 ids.push(region.id);
                 crops.push(crop);
@@ -762,12 +640,16 @@ pub fn run_ocr(
     device: &str,
     tuning: Option<models::InferenceTuning>,
 ) -> Result<PreannResult, String> {
+    check_preannotation_cancelled()?;
     let ocr = get_or_build_ocr(app, profile_key, device, tuning)?;
+    check_preannotation_cancelled()?;
     let img =
         load_image(Path::new(image_path)).map_err(|e| format!("Failed to load image: {e}"))?;
+    check_preannotation_cancelled()?;
     let results = ocr
         .predict(vec![img])
         .map_err(|e| format!("OCR prediction failed: {e}"))?;
+    check_preannotation_cancelled()?;
 
     let mut out = Vec::new();
     if let Some(res) = results.into_iter().next() {
@@ -786,54 +668,6 @@ pub fn run_ocr(
                 text: region.text.map(|t| t.to_string()),
                 label: None,
                 score: region.confidence,
-                order: None,
-                id: None,
-                parent_id: None,
-            });
-        }
-    }
-    Ok(PreannResult::no_skip(out))
-}
-
-/// Reading-order mode. oar-ocr's `predict` already returns text regions sorted
-/// into reading order (line-aware top-to-bottom, left-to-right via
-/// `sort_quad_boxes`), so this is OCR plus a 0-based position index attached to
-/// each box so the frontend/export can expose a stable sequence.
-pub fn run_reading_order(
-    app: &AppHandle,
-    image_path: &str,
-    profile_key: &str,
-    device: &str,
-    tuning: Option<models::InferenceTuning>,
-) -> Result<PreannResult, String> {
-    let ocr = get_or_build_ocr(app, profile_key, device, tuning)?;
-    let img =
-        load_image(Path::new(image_path)).map_err(|e| format!("Failed to load image: {e}"))?;
-    let results = ocr
-        .predict(vec![img])
-        .map_err(|e| format!("OCR prediction failed: {e}"))?;
-
-    let mut out = Vec::new();
-    if let Some(res) = results.into_iter().next() {
-        // text_regions arrive in reading order; enumerate to assign the index.
-        for (i, region) in res.text_regions.into_iter().enumerate() {
-            let points: Vec<[f32; 2]> = region
-                .bounding_box
-                .points
-                .iter()
-                .map(|p| [p.x, p.y])
-                .collect();
-            if points.is_empty() {
-                continue;
-            }
-            out.push(PreannBox {
-                points,
-                text: region.text.map(|t| t.to_string()),
-                label: None,
-                score: region.confidence,
-                order: Some(i as u32),
-                id: None,
-                parent_id: None,
             });
         }
     }
@@ -848,13 +682,17 @@ pub fn run_layout(
     device: &str,
     tuning: Option<models::InferenceTuning>,
 ) -> Result<PreannResult, String> {
+    check_preannotation_cancelled()?;
     let predictor = get_or_build_layout(app, layout_key, device, tuning.and_then(|t| t.layout))?;
+    check_preannotation_cancelled()?;
     let img =
         load_image(Path::new(image_path)).map_err(|e| format!("Failed to load image: {e}"))?;
     let (page_width, page_height) = (img.width() as f32, img.height() as f32);
+    check_preannotation_cancelled()?;
     let output = predictor
         .predict(vec![img])
         .map_err(|e| format!("Layout detection failed: {e}"))?;
+    check_preannotation_cancelled()?;
 
     let mut out = Vec::new();
     if let Some(mut elements) = output.elements.into_iter().next() {
@@ -878,14 +716,12 @@ pub fn run_layout(
         }
 
         for el in elements {
+            check_preannotation_cancelled()?;
             if let Some(keys) = filter {
                 // Exact label match (case-insensitive). `contains` would let a
-                // short key like "table" also match "table_title" /
-                // "figure_table_chart_title", and "formula" match
-                // "formula_number", so the table/formula modes would crop
-                // captions and equation numbers and feed them to the structure
-                // / formula recognizer. oar-ocr labels are snake_case
-                // ("table", "formula", "table_title", "formula_number", ...).
+                // short key like "formula" also match "formula_number", so
+                // formula mode would crop equation numbers and feed them to the
+                // recognizer. oar-ocr labels are snake_case.
                 let et = el.element_type.to_lowercase();
                 if !keys.iter().any(|k| et == *k) {
                     continue;
@@ -900,9 +736,6 @@ pub fn run_layout(
                 text: None,
                 label: Some(el.element_type.clone()),
                 score: Some(el.score),
-                order: Some(out.len() as u32),
-                id: None,
-                parent_id: None,
             });
         }
     }
@@ -917,6 +750,7 @@ pub fn run_formula(
     device: &str,
     tuning: Option<models::InferenceTuning>,
 ) -> Result<PreannResult, String> {
+    check_preannotation_cancelled()?;
     // run_layout returns PreannResult; for formula mode it never skips, so the
     // layout boxes are the candidate regions.
     let regions = run_layout(
@@ -928,7 +762,9 @@ pub fn run_formula(
         tuning,
     )?
     .boxes;
+    check_preannotation_cancelled()?;
     let predictor = get_or_build_formula(app, formula_key, device)?;
+    check_preannotation_cancelled()?;
     let image =
         load_image(Path::new(image_path)).map_err(|e| format!("Failed to load image: {e}"))?;
     let mut out = Vec::with_capacity(regions.len());
@@ -937,13 +773,15 @@ pub fn run_formula(
     let mut skipped: u32 = 0;
 
     for (i, region) in regions.into_iter().enumerate() {
-        let crop = match crop_region(&image, &region.points) {
-            Ok((c, _origin)) => c,
+        check_preannotation_cancelled()?;
+        let crop = match geometry::crop_bounding_rect(&image, &region.points) {
+            Ok(crop) => crop,
             Err(_) => {
                 skipped += 1;
                 continue;
             }
         };
+        check_preannotation_cancelled()?;
         let result = match predictor.predict(vec![crop]) {
             Ok(r) => r,
             Err(e) => {
@@ -960,6 +798,7 @@ pub fn run_formula(
                 continue;
             }
         };
+        check_preannotation_cancelled()?;
         let latex = match result.formulas.into_iter().next() {
             Some(l) => l,
             None => {
@@ -979,392 +818,7 @@ pub fn run_formula(
             text: Some(latex),
             label: Some("formula".into()),
             score,
-            order: None,
-            id: None,
-            parent_id: None,
         });
-    }
-
-    Ok(PreannResult {
-        boxes: out,
-        skipped,
-    })
-}
-
-pub fn run_table(
-    app: &AppHandle,
-    image_path: &str,
-    layout_key: &str,
-    table_key: &str,
-    device: &str,
-    tuning: Option<models::InferenceTuning>,
-) -> Result<PreannResult, String> {
-    let regions = run_layout(
-        app,
-        image_path,
-        Some(&["table"]),
-        layout_key,
-        device,
-        tuning,
-    )?
-    .boxes;
-    let predictor = get_or_build_table(app, table_key, device)?;
-    let image =
-        load_image(Path::new(image_path)).map_err(|e| format!("Failed to load image: {e}"))?;
-    let mut out = Vec::with_capacity(regions.len());
-    // As with formulas, skip a bad region rather than failing every table.
-    let mut skipped: u32 = 0;
-
-    for (i, region) in regions.into_iter().enumerate() {
-        let crop = match crop_region(&image, &region.points) {
-            Ok((c, _origin)) => c,
-            Err(_) => {
-                skipped += 1;
-                continue;
-            }
-        };
-        let result = match predictor.predict(vec![crop]) {
-            Ok(r) => r,
-            Err(e) => {
-                // See run_formula: a model/predictor failure is systemic, so
-                // surface it on the first region rather than masking as
-                // "0 results, N skipped". Later regions stay skippable.
-                if i == 0 {
-                    return Err(format!("Table recognition failed: {e}"));
-                }
-                skipped += 1;
-                continue;
-            }
-        };
-        let structure = match result.structures.into_iter().next() {
-            Some(s) => s,
-            None => {
-                skipped += 1;
-                continue;
-            }
-        };
-        out.push(PreannBox {
-            points: region.points,
-            text: Some(structure.join("")),
-            label: Some("table".into()),
-            score: None,
-            order: None,
-            id: None,
-            parent_id: None,
-        });
-    }
-
-    Ok(PreannResult {
-        boxes: out,
-        skipped,
-    })
-}
-
-/// Layout labels that contain readable text. In the structured pipeline these
-/// regions are cropped and fed to OCR to produce text-line children; other
-/// labels (figure, chart, …) stay as leaf regions.
-fn is_text_region(label: &str) -> bool {
-    matches!(
-        label.to_lowercase().as_str(),
-        "text"
-            | "title"
-            | "plain_text"
-            | "paragraph"
-            | "header"
-            | "footer"
-            | "caption"
-            | "table_caption"
-            | "table_text"
-            | "formula" // OCR often reads surrounding line; harmless
-    )
-}
-
-/// Pre-annotation dispatch over the active `modes`. The shape of the result
-/// depends on whether `layout` is among them:
-///
-/// - **`layout` active** → structured pipeline: layout runs once and its regions
-///   become parents; each selected recognizer then enriches the matching region
-///   type (text regions → OCR children, `formula` regions → LaTeX children,
-///   `table` regions → table-structure children). Children link back to their
-///   region via `parent_id`.
-/// - **`layout` not active** → flat pipeline: each selected mode runs on the
-///   whole image independently and its boxes are concatenated, with no parent/
-///   child linkage. E.g. only `ocr` → pure OCR run; only `formula` → whole-image
-///   formula recognition.
-///
-/// `reading` ⊇ `ocr` (a reading box is an OCR box plus an order index), so when
-/// both are active only `reading` runs in the flat path to avoid double-counting.
-pub struct StructureRunConfig<'a> {
-    pub layout_key: &'a str,
-    pub ocr_key: &'a str,
-    pub formula_key: &'a str,
-    pub table_key: &'a str,
-    pub device: &'a str,
-    pub tuning: Option<models::InferenceTuning>,
-}
-
-pub fn run_structure(
-    app: &AppHandle,
-    image_path: &str,
-    modes: &[String],
-    config: StructureRunConfig<'_>,
-) -> Result<PreannResult, String> {
-    let want_layout = modes.iter().any(|m| m == "layout");
-    if !want_layout {
-        return run_flat(app, image_path, modes, &config);
-    }
-    run_structured(app, image_path, modes, &config)
-}
-
-/// Flat pipeline (no `layout` mode): run each selected recognizer on the whole
-/// image and concatenate the resulting boxes. No region/parent linkage.
-///
-/// Note: `run_formula` / `run_table` internally use a layout detector to locate
-/// candidate regions (they always have), so they still receive `layout_key`.
-/// The user-facing distinction is that no top-level layout *regions* are emitted
-/// here — only the recognized formula/table boxes.
-fn run_flat(
-    app: &AppHandle,
-    image_path: &str,
-    modes: &[String],
-    config: &StructureRunConfig<'_>,
-) -> Result<PreannResult, String> {
-    let want_reading = modes.iter().any(|m| m == "reading");
-    let want_ocr = modes.iter().any(|m| m == "ocr");
-    let want_formula = modes.iter().any(|m| m == "formula");
-    let want_table = modes.iter().any(|m| m == "table");
-
-    let mut out: Vec<PreannBox> = Vec::new();
-    let mut skipped: u32 = 0;
-
-    // `reading` produces OCR boxes + an order index, so it supersedes plain OCR
-    // when both are active — run only reading to avoid duplicating text boxes.
-    if want_reading {
-        let r = run_reading_order(
-            app,
-            image_path,
-            config.ocr_key,
-            config.device,
-            config.tuning,
-        )?;
-        skipped += r.skipped;
-        out.extend(r.boxes);
-    } else if want_ocr {
-        let r = run_ocr(
-            app,
-            image_path,
-            config.ocr_key,
-            config.device,
-            config.tuning,
-        )?;
-        skipped += r.skipped;
-        out.extend(r.boxes);
-    }
-    if want_formula {
-        let r = run_formula(
-            app,
-            image_path,
-            config.layout_key,
-            config.formula_key,
-            config.device,
-            config.tuning,
-        )?;
-        skipped += r.skipped;
-        out.extend(r.boxes);
-    }
-    if want_table {
-        let r = run_table(
-            app,
-            image_path,
-            config.layout_key,
-            config.table_key,
-            config.device,
-            config.tuning,
-        )?;
-        skipped += r.skipped;
-        out.extend(r.boxes);
-    }
-
-    Ok(PreannResult {
-        boxes: out,
-        skipped,
-    })
-}
-
-/// Structured pipeline (`layout` mode active): see `run_structure` docs.
-fn run_structured(
-    app: &AppHandle,
-    image_path: &str,
-    modes: &[String],
-    config: &StructureRunConfig<'_>,
-) -> Result<PreannResult, String> {
-    let want_ocr = modes.iter().any(|m| m == "ocr" || m == "reading");
-    let want_reading = modes.iter().any(|m| m == "reading");
-    let want_formula = modes.iter().any(|m| m == "formula");
-    let want_table = modes.iter().any(|m| m == "table");
-
-    // Layout is always the skeleton: regions become parents.
-    let regions = run_layout(
-        app,
-        image_path,
-        None,
-        config.layout_key,
-        config.device,
-        config.tuning,
-    )?
-    .boxes;
-    let image =
-        load_image(Path::new(image_path)).map_err(|e| format!("Failed to load image: {e}"))?;
-
-    let ocr = if want_ocr {
-        Some(get_or_build_ocr(
-            app,
-            config.ocr_key,
-            config.device,
-            config.tuning,
-        )?)
-    } else {
-        None
-    };
-    let formula_predictor = if want_formula {
-        Some(get_or_build_formula(
-            app,
-            config.formula_key,
-            config.device,
-        )?)
-    } else {
-        None
-    };
-    let table_predictor = if want_table {
-        Some(get_or_build_table(app, config.table_key, config.device)?)
-    } else {
-        None
-    };
-
-    let mut out: Vec<PreannBox> = Vec::new();
-    let mut skipped: u32 = 0;
-
-    for (r_idx, region) in regions.into_iter().enumerate() {
-        let region_id = format!("r{r_idx}");
-        let label = region.label.clone().unwrap_or_default();
-        let label_lower = label.to_lowercase();
-
-        // Emit the region itself as a parent (always, so the structure is
-        // visible even when no recognizer enriched it).
-        out.push(PreannBox {
-            points: region.points.clone(),
-            text: None,
-            label: region.label.clone(),
-            score: region.score,
-            order: None,
-            id: Some(region_id.clone()),
-            parent_id: None,
-        });
-
-        let crop_result = crop_region(&image, &region.points);
-        let (crop, origin) = match crop_result {
-            Ok(v) => v,
-            Err(_) => {
-                skipped += 1;
-                continue;
-            }
-        };
-
-        // OCR text-line children for text-like regions.
-        if want_ocr && is_text_region(&label_lower) {
-            if let Some(predictor) = &ocr {
-                match predictor.predict(vec![crop.clone()]) {
-                    Ok(results) => {
-                        if let Some(res) = results.into_iter().next() {
-                            for (line_idx, tr) in res.text_regions.into_iter().enumerate() {
-                                // OCR boxes are relative to the crop; offset them
-                                // back into image coordinates by the crop origin.
-                                let points: Vec<[f32; 2]> = tr
-                                    .bounding_box
-                                    .points
-                                    .iter()
-                                    .map(|p| [p.x + origin.0 as f32, p.y + origin.1 as f32])
-                                    .collect();
-                                if points.is_empty() {
-                                    continue;
-                                }
-                                out.push(PreannBox {
-                                    points,
-                                    text: tr.text.map(|t| t.to_string()),
-                                    label: Some("text".into()),
-                                    score: tr.confidence,
-                                    order: want_reading.then_some((r_idx * 1000 + line_idx) as u32),
-                                    id: None,
-                                    parent_id: Some(region_id.clone()),
-                                });
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        // OCR predictor failure is systemic (wrong model /
-                        // device). Surface it rather than masking as skipped.
-                        return Err(format!("OCR recognition failed: {e}"));
-                    }
-                }
-            }
-        }
-
-        // Formula LaTeX child for formula regions.
-        if want_formula && label_lower == "formula" {
-            if let Some(predictor) = &formula_predictor {
-                match predictor.predict(vec![crop.clone()]) {
-                    Ok(result) => {
-                        // `scores` is Vec<Option<f32>>; mirror run_formula's
-                        // extraction so a missing score skips the region.
-                        let latex = result.formulas.into_iter().next();
-                        let score = result.scores.into_iter().next().flatten();
-                        if let (Some(latex), score) = (latex, score) {
-                            out.push(PreannBox {
-                                // The LaTeX describes the whole region.
-                                points: region.points.clone(),
-                                text: Some(latex),
-                                label: Some("formula".into()),
-                                score,
-                                order: None,
-                                id: None,
-                                parent_id: Some(region_id.clone()),
-                            });
-                        } else {
-                            skipped += 1;
-                        }
-                    }
-                    Err(e) => {
-                        return Err(format!("Formula recognition failed: {e}"));
-                    }
-                }
-            }
-        }
-
-        // Table structure child for table regions.
-        if want_table && label_lower == "table" {
-            if let Some(predictor) = &table_predictor {
-                match predictor.predict(vec![crop]) {
-                    Ok(result) => {
-                        if let Some(structure) = result.structures.into_iter().next() {
-                            out.push(PreannBox {
-                                points: region.points.clone(),
-                                text: Some(structure.join("")),
-                                label: Some("table".into()),
-                                score: None,
-                                order: None,
-                                id: None,
-                                parent_id: Some(region_id.clone()),
-                            });
-                        } else {
-                            skipped += 1;
-                        }
-                    }
-                    Err(e) => {
-                        return Err(format!("Table recognition failed: {e}"));
-                    }
-                }
-            }
-        }
     }
 
     Ok(PreannResult {
