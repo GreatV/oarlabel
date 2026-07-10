@@ -1,19 +1,43 @@
 import { Loader2, X } from "lucide-react";
+import { useShallow } from "zustand/react/shallow";
 import { modeLabel, t } from "@/i18n";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useStore } from "@/store";
-import { DEVICE_OPTIONS } from "@/types";
+import { DEFAULT_DEVICE_OPTIONS } from "@/types";
 
 export function StatusBar() {
-  const s = useStore();
-  const l = s.locale;
-  const img = s.currentImage();
-  const total = s.images.length;
-  const requestBatchCancel = useStore((st) => st.requestBatchCancel);
+  const s = useStore(
+    useShallow((state) => {
+      const img = state.currentImage();
+      return {
+        l: state.locale,
+        img,
+        currentIndex: state.currentIndex,
+        total: state.images.length,
+        currentImageDirty: img ? !!state.dirtyPaths[img.path] : false,
+        busy: state.busy,
+        statusMsg: state.statusMsg,
+        dirty: state.dirty,
+        batchRunning: state.batchRunning,
+        batchCancelRequested: state.batchCancelRequested,
+        zoom: state.zoom,
+        mode: state.mode,
+        modelOptions: state.modelOptions,
+        ocrModel: state.ocrModel,
+        layoutModel: state.layoutModel,
+        formulaModel: state.formulaModel,
+        device: state.device,
+        deviceOptions: state.deviceOptions,
+        requestBatchCancel: state.requestBatchCancel,
+      };
+    }),
+  );
+  const { l, img, total, currentImageDirty, requestBatchCancel } = s;
+  const deviceOptions = s.deviceOptions.length ? s.deviceOptions : DEFAULT_DEVICE_OPTIONS;
   const deviceLabel =
-    DEVICE_OPTIONS.find((d) => d.key === s.device)?.label ?? s.device;
-  const activeMode = s.modes[0] ?? "ocr";
+    deviceOptions.find((d) => d.key === s.device)?.label ?? s.device;
+  const activeMode = s.mode;
   const activeModelTitle =
     activeMode === "layout"
       ? (s.modelOptions?.layout_models.find((o) => o.key === s.layoutModel)?.title ??
@@ -33,7 +57,7 @@ export function StatusBar() {
         </span>
         {s.dirty && (
           <span className="shrink-0 rounded bg-status-warning px-1.5 py-0.5 text-status-warning-foreground">
-            {t(l, "common.unsaved")}
+            {t(l, currentImageDirty ? "common.unsaved" : "statusbar.otherImagesUnsaved")}
           </span>
         )}
         {s.batchRunning && (

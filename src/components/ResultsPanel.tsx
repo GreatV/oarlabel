@@ -1,8 +1,9 @@
-import { ChevronDown, ChevronRight, FileText, ScanText } from "lucide-react";
+import { FileText, ScanText } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { InputHTMLAttributes } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -18,7 +19,7 @@ import { t } from "@/i18n";
 import { colorFor } from "@/lib/palette";
 import { cn } from "@/lib/utils";
 import { useStore } from "@/store";
-import { resultLabel, resultReadingIndex, resultScore, resultText } from "@/types";
+import { resultLabel, resultScore, resultText } from "@/types";
 import type { Annotation } from "@/types";
 
 /** Suggested region labels offered as autocomplete options. Free text is still
@@ -40,64 +41,15 @@ interface ResultsPanelProps {
   width: number;
 }
 
-/** A row in the list — either a top-level region or a child (text/formula/
- * table line) nested under its region. Children are indented under their
- * parent and grouped with a collapsible header. */
-interface Row {
-  anno: Annotation;
-  index: number; // position within the flat annotation list (for color/badge)
-  depth: 0 | 1;
-}
-
 export function ResultsPanel({ width }: ResultsPanelProps) {
-  const s = useStore();
-  const l = s.locale;
-  const annos = s.currentAnnos();
-  // Which parent regions are collapsed. Lifted out of ResultRow because the
-  // rows array is built here — collapsing must skip children at build time,
-  // not just hide them after the fact.
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const toggleCollapse = (id: string) =>
-    setCollapsed((cur) => {
-      const next = new Set(cur);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-
-  // Flatten the annotation list into render rows: parents first, then their
-  // children, so the tree reads top-down. Top-level (parentless) annotations
-  // that carry text are also valid rows (single-mode OCR output, manual boxes).
-  const rows: Row[] = [];
-  const childrenOf = new Map<string, Annotation[]>();
-  for (const a of annos) {
-    if (a.parentId) {
-      const arr = childrenOf.get(a.parentId) ?? [];
-      arr.push(a);
-      childrenOf.set(a.parentId, arr);
-    }
-  }
-  let flatIndex = 0;
-  for (const a of annos) {
-    if (a.parentId) continue; // rendered under its parent
-    rows.push({ anno: a, index: flatIndex, depth: 0 });
-    flatIndex++;
-    // Skip a collapsed region's children. flatIndex still advances so color
-    // badges of later regions stay stable when collapsing/expanding.
-    if (collapsed.has(a.id)) {
-      flatIndex += childrenOf.get(a.id)?.length ?? 0;
-      continue;
-    }
-    const kids = childrenOf.get(a.id) ?? [];
-    for (const k of kids) {
-      rows.push({ anno: k, index: flatIndex, depth: 1 });
-      flatIndex++;
-    }
-  }
-
+  const { l, annos, busy, recognizeAllTextBoxes } = useStore(
+    useShallow((s) => ({
+      l: s.locale,
+      annos: s.currentAnnos(),
+      busy: s.busy,
+      recognizeAllTextBoxes: s.recognizeAllTextBoxes,
+    })),
+  );
   return (
     <div className="flex h-full min-w-64 flex-col border-l bg-card" style={{ width }}>
       <div className="flex items-center justify-between px-3 py-2.5">
@@ -108,8 +60,8 @@ export function ResultsPanel({ width }: ResultsPanelProps) {
             variant="ghost"
             size="sm"
             className="h-7 gap-1.5 px-2"
-            disabled={!annos.length || s.busy}
-            onClick={() => s.recognizeAllTextBoxes()}
+            disabled={!annos.length || busy}
+            onClick={() => recognizeAllTextBoxes()}
           >
             <ScanText className="h-3.5 w-3.5" />
             {t(l, "results.recognizeAllText")}
@@ -135,15 +87,8 @@ export function ResultsPanel({ width }: ResultsPanelProps) {
               <p className="text-xs leading-5 text-muted-foreground">{t(l, "results.empty")}</p>
             </div>
           ) : (
-            rows.map(({ anno, index, depth }) => (
-              <ResultRow
-                key={anno.id}
-                anno={anno}
-                index={index}
-                depth={depth}
-                open={!collapsed.has(anno.id)}
-                onToggleCollapse={() => toggleCollapse(anno.id)}
-              />
+            annos.map((anno, index) => (
+              <ResultRow key={anno.id} anno={anno} index={index} />
             ))
           )}
         </div>
@@ -155,54 +100,79 @@ export function ResultsPanel({ width }: ResultsPanelProps) {
 function ResultRow({
   anno,
   index,
-  depth,
-  open,
-  onToggleCollapse,
 }: {
   anno: Annotation;
   index: number;
-  depth: 0 | 1;
-  open: boolean;
-  onToggleCollapse: () => void;
 }) {
-  const s = useStore();
-  const l = s.locale;
+  const {
+    l,
+    selected,
+    busy,
+    clipboardCount,
+    selectionCount,
+    select,
+    setAnnotationHidden,
+    setText,
+    setLabel,
+    copySelection,
+    paste,
+    ensureTextResult,
+    recognizeSelectedText,
+    removeAnnotation,
+    selectAll,
+    clearSelection,
+  } = useStore(
+    useShallow((s) => ({
+      l: s.locale,
+      selected: s.selectedIds.includes(anno.id),
+      busy: s.busy,
+      clipboardCount: s.clipboard.length,
+      selectionCount: s.selectedIds.length,
+      select: s.select,
+      setAnnotationHidden: s.setAnnotationHidden,
+      setText: s.setText,
+      setLabel: s.setLabel,
+      copySelection: s.copySelection,
+      paste: s.paste,
+      ensureTextResult: s.ensureTextResult,
+      recognizeSelectedText: s.recognizeSelectedText,
+      removeAnnotation: s.removeAnnotation,
+      selectAll: s.selectAll,
+      clearSelection: s.clearSelection,
+    })),
+  );
   const color = colorFor(index);
-  const selected = s.selectedIds.includes(anno.id);
   // Each annotation renders by its OWN data, not the global mode: a row that
   // carries recognized text (text/formula/table) shows an editable input;
   // a pure layout region shows its label + detection score.
   const hasText = anno.results.some((r) => r.task === "text_recognition");
   const label = resultLabel(anno);
   const isFormula = label === "formula";
-  // In reading-order mode the badge shows the logical order index (1-based)
-  // instead of the row position, so it matches the exported sequence.
-  const readingIdx = resultReadingIndex(anno);
-  const badge = readingIdx != null ? readingIdx + 1 : index + 1;
+  const badge = index + 1;
   const score = resultScore(anno);
 
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
-          onClick={(e) => s.select(anno.id, e.ctrlKey || e.metaKey)}
+          onClick={(e) => select(anno.id, e.ctrlKey || e.metaKey)}
           onContextMenu={() => {
             // Select the right-clicked row first so Copy/Delete below act on it.
-            if (!selected) s.select(anno.id);
+            if (!selected) select(anno.id);
           }}
           className={cn(
             "result-row mb-1.5 flex cursor-pointer items-start gap-2 rounded-md border px-2 py-1.5 transition-colors",
-            depth === 1 && "ml-4",
             anno.hidden && "opacity-55",
             selected ? "border-primary/40 bg-accent" : "border-transparent hover:bg-secondary",
           )}
         >
           <Checkbox
             checked={!anno.hidden}
+            disabled={busy}
             aria-label={t(l, "results.showBox")}
             className="mt-1"
             onClick={(e) => e.stopPropagation()}
-            onCheckedChange={(checked) => s.setAnnotationHidden(anno.id, checked !== true)}
+            onCheckedChange={(checked) => setAnnotationHidden(anno.id, checked !== true)}
           />
           <span
             className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-[11px] font-semibold text-white"
@@ -215,32 +185,21 @@ function ResultRow({
               {isFormula && <FormulaPreview latex={resultText(anno)} />}
               <CommitTextarea
                 value={resultText(anno)}
+                disabled={busy}
                 placeholder={isFormula ? "LaTeX..." : t(l, "results.placeholder")}
                 ariaLabel={isFormula ? "LaTeX" : t(l, "results.textTitle")}
-                onCommit={(value) => s.setText(anno.id, value)}
+                onCommit={(value) => setText(anno.id, value)}
               />
               <OriginalValue value={originalText(anno)} current={resultText(anno)} />
             </div>
           ) : (
             <div className="flex flex-1 items-center gap-1.5 py-1 text-sm">
-              {!anno.parentId && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onToggleCollapse();
-                  }}
-                  className="text-muted-foreground hover:text-foreground"
-                  aria-label={open ? "collapse" : "expand"}
-                >
-                  {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                </button>
-              )}
               <CommitLabelInput
                 value={label ?? ""}
+                disabled={busy}
                 placeholder={t(l, "results.region")}
                 aria-label={t(l, "results.region")}
-                onCommit={(value) => s.setLabel(anno.id, value)}
+                onCommit={(value) => setLabel(anno.id, value)}
               />
               {score != null && (
                 <span className="text-xs text-muted-foreground">{(score * 100).toFixed(1)}%</span>
@@ -251,33 +210,33 @@ function ResultRow({
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem disabled={!selected} onClick={() => s.copySelection()}>
+        <ContextMenuItem disabled={!selected} onClick={() => copySelection()}>
           {t(l, "menu.edit.copy")}
           <ContextMenuShortcut>Ctrl+C</ContextMenuShortcut>
         </ContextMenuItem>
-        <ContextMenuItem disabled={!s.clipboard.length} onClick={() => s.paste()}>
+        <ContextMenuItem disabled={busy || !clipboardCount} onClick={() => paste()}>
           {t(l, "menu.edit.paste")}
           <ContextMenuShortcut>Ctrl+V</ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuSeparator />
         {!hasText && (
-          <ContextMenuItem onClick={() => s.ensureTextResult(anno.id)}>
+          <ContextMenuItem disabled={busy} onClick={() => ensureTextResult(anno.id)}>
             {t(l, "results.addText")}
           </ContextMenuItem>
         )}
-        <ContextMenuItem onClick={() => s.recognizeSelectedText()} disabled={s.busy}>
+        <ContextMenuItem onClick={() => recognizeSelectedText()} disabled={busy}>
           {t(l, "results.recognizeText")}
         </ContextMenuItem>
-        <ContextMenuItem onClick={() => s.removeAnnotation(anno.id)}>
+        <ContextMenuItem disabled={busy} onClick={() => removeAnnotation(anno.id)}>
           {t(l, "toolbar.delete")}
           <ContextMenuShortcut>Del</ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem onClick={() => s.selectAll()}>
+        <ContextMenuItem onClick={() => selectAll()}>
           {t(l, "menu.edit.selectAll")}
           <ContextMenuShortcut>Ctrl+A</ContextMenuShortcut>
         </ContextMenuItem>
-        <ContextMenuItem disabled={!s.selectedIds.length} onClick={() => s.clearSelection()}>
+        <ContextMenuItem disabled={!selectionCount} onClick={() => clearSelection()}>
           {t(l, "menu.edit.clearSelection")}
           <ContextMenuShortcut>Esc</ContextMenuShortcut>
         </ContextMenuItem>
@@ -306,11 +265,13 @@ function FormulaPreview({ latex }: { latex: string }) {
 
 function CommitTextarea({
   value,
+  disabled,
   placeholder,
   ariaLabel,
   onCommit,
 }: {
   value: string;
+  disabled?: boolean;
   placeholder: string;
   ariaLabel: string;
   onCommit: (value: string) => void;
@@ -343,6 +304,7 @@ function CommitTextarea({
       ref={textareaRef}
       rows={1}
       value={draft}
+      disabled={disabled}
       placeholder={placeholder}
       aria-label={ariaLabel}
       onMouseDown={(e) => e.stopPropagation()}

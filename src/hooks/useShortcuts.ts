@@ -1,12 +1,12 @@
 import { useEffect } from "react";
 import { win } from "@/lib/tauri";
-import { isTextInputTarget } from "@/lib/keyboard";
+import { shouldIgnoreGlobalShortcut } from "@/lib/keyboard";
 import { useStore } from "@/store";
 
 export function useShortcuts() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (isTextInputTarget(e.target)) return;
+      if (shouldIgnoreGlobalShortcut(e.target)) return;
       const s = useStore.getState();
       const meta = e.ctrlKey || e.metaKey;
 
