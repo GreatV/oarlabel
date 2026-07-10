@@ -20,12 +20,11 @@ import {
 import { useShallow } from "zustand/react/shallow";
 import { fileSrc } from "@/lib/tauri";
 import { t, tt } from "@/i18n";
-import { isTextInputTarget } from "@/lib/keyboard";
+import { shouldIgnoreGlobalShortcut } from "@/lib/keyboard";
 import { colorFor, usePalette, withAlpha } from "@/lib/palette";
 import { shortcut } from "@/lib/platform";
 import { useStore } from "@/store";
 import type { Annotation, FitMode, Point } from "@/types";
-import { resultReadingIndex } from "@/types";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -116,7 +115,6 @@ export function CanvasStage() {
   const annos = useStore((s) => s.currentAnnos());
   const addAnnotation = useStore((s) => s.addAnnotation);
   const updateAnnotationPoints = useStore((s) => s.updateAnnotationPoints);
-  const moveAnnotationTree = useStore((s) => s.moveAnnotationTree);
   const removeSelected = useStore((s) => s.removeSelected);
   const select = useStore((s) => s.select);
   const copySelection = useStore((s) => s.copySelection);
@@ -160,6 +158,11 @@ export function CanvasStage() {
   const [dragPts, setDragPts] = useState<Point[] | null>(null);
   // Which annotation id dragPts applies to (ignored when dragPts is null).
   const [dragId, setDragId] = useState<string | null>(null);
+  // Keep the latest drag geometry synchronously as well as in React state.
+  // Konva dragend can run before React has rendered the final dragmove update,
+  // especially for short, high-frequency trackpad gestures.
+  const dragPtsRef = useRef<Point[] | null>(null);
+  const dragIdRef = useRef<string | null>(null);
   const polygonCloseReady =
     !!draftPoly &&
     draftPoly.length >= 3 &&
@@ -179,6 +182,8 @@ export function CanvasStage() {
     setCursor(null);
     setDragPts(null);
     setDragId(null);
+    dragPtsRef.current = null;
+    dragIdRef.current = null;
   }, [img?.path]);
 
   useEffect(() => {
@@ -186,6 +191,17 @@ export function CanvasStage() {
     setDraftPoly(null);
     setCursor(null);
   }, [tool]);
+
+  useEffect(() => {
+    if (!busy) return;
+    setDraftRect(null);
+    setDraftPoly(null);
+    setCursor(null);
+    setDragPts(null);
+    setDragId(null);
+    dragPtsRef.current = null;
+    dragIdRef.current = null;
+  }, [busy]);
 
   useEffect(() => {
     if (!polygonCloseReady) {
@@ -366,7 +382,7 @@ export function CanvasStage() {
   }, [zoom]);
 
   const handleMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
-    if (!image) return;
+    if (!image || busy) return;
     const stage = e.target.getStage();
     const pointer = stage?.getPointerPosition();
     if (!pointer) return;
@@ -388,6 +404,10 @@ export function CanvasStage() {
   };
 
   const handleMouseUp = () => {
+    if (busy) {
+      setDraftRect(null);
+      return;
+    }
     if (draftRect) {
       const { x0, y0, x1, y1 } = draftRect;
       const w = Math.abs(x1 - x0);
@@ -417,6 +437,7 @@ export function CanvasStage() {
   };
 
   const handleStageClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
+    if (busy) return;
     if (tool === "polygon") {
       const stage = e.target.getStage();
       const pointer = stage?.getPointerPosition();
@@ -454,7 +475,7 @@ export function CanvasStage() {
   // Keyboard: finish/cancel polygon, delete selection.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (isTextInputTarget(e.target)) return;
+      if (shouldIgnoreGlobalShortcut(e.target)) return;
       if (e.key === "Enter" && !e.metaKey && !e.ctrlKey && draftPoly) finishPolygon();
       else if (e.key === "Escape") {
         setDraftPoly(null);
@@ -483,7 +504,7 @@ export function CanvasStage() {
   const tagFont = 12 / zoom;
   const tagW = 18 / zoom;
   const tagH = 16 / zoom;
-  const draggable = tool === "select";
+  const draggable = tool === "select" && !busy;
 
   /** Render the edit handles for a selected annotation. Rect annotations get
    *  8 resize handles (4 corners + 4 edge midpoints) that keep the shape
@@ -496,10 +517,16 @@ export function CanvasStage() {
   ) => {
     const commit = (next: Point[]) => {
       updateAnnotationPoints(anno.id, next);
+      dragPtsRef.current = null;
+      dragIdRef.current = null;
       setDragPts(null);
       setDragId(null);
     };
-    const startDrag = () => setDragId(anno.id);
+    const startDrag = () => {
+      dragPtsRef.current = null;
+      dragIdRef.current = anno.id;
+      setDragId(anno.id);
+    };
 
     if (anno.shape === "rect") {
       const [tl, tr, br, bl] = rectFromPoints(livePts);
@@ -516,7 +543,7 @@ export function CanvasStage() {
         { p: [(bl[0] + br[0]) / 2, br[1]], type: "s" },
         { p: [bl[0], (tl[1] + bl[1]) / 2], type: "w" },
       ];
-      const resizeTo = (next: [Point, Point, Point, Point]) => {
+      const validResize = (next: [Point, Point, Point, Point]) => {
         // Enforce the configured minimum so a corner/edge can't invert or
         // collapse the box.
         const [a, b, c, d] = next;
@@ -524,7 +551,11 @@ export function CanvasStage() {
         const maxX = Math.max(a[0], b[0], c[0], d[0]);
         const minY = Math.min(a[1], b[1], c[1], d[1]);
         const maxY = Math.max(a[1], b[1], c[1], d[1]);
-        if (maxX - minX < minBoxSize || maxY - minY < minBoxSize) return;
+        return maxX - minX >= minBoxSize && maxY - minY >= minBoxSize;
+      };
+      const resizeTo = (next: [Point, Point, Point, Point]) => {
+        if (!validResize(next)) return;
+        dragPtsRef.current = next;
         setDragPts(next);
       };
       return (
@@ -554,18 +585,37 @@ export function CanvasStage() {
                   [Math.min(nx, opp[0]), Math.max(ny, opp[1])],
                 ]);
               }}
-              onDragEnd={() => {
-                if (dragPts && dragId === anno.id) commit(dragPts);
+              onDragEnd={(e) => {
+                const raw = image
+                  ? clampPoint([e.target.x(), e.target.y()], image.width, image.height)
+                  : ([e.target.x(), e.target.y()] as Point);
+                const [nx, ny] = raw;
+                const opp = corners[(vi + 2) % 4].p;
+                const finalPoints: [Point, Point, Point, Point] = [
+                  [Math.min(nx, opp[0]), Math.min(ny, opp[1])],
+                  [Math.max(nx, opp[0]), Math.min(ny, opp[1])],
+                  [Math.max(nx, opp[0]), Math.max(ny, opp[1])],
+                  [Math.min(nx, opp[0]), Math.max(ny, opp[1])],
+                ];
+                // Derive the normal path from the dragend event itself. If the
+                // pointer ended inside the minimum-size dead zone, retain the
+                // last valid preview captured synchronously in the ref.
+                if (validResize(finalPoints)) commit(finalPoints);
+                else if (dragIdRef.current === anno.id && dragPtsRef.current) {
+                  commit(dragPtsRef.current);
+                }
               }}
             />
           ))}
           {edges.map(({ p, type }) => (
             <Rect
               key={`e${type}`}
-              x={p[0] - 4 / zoom}
-              y={p[1] - 4 / zoom}
+              x={p[0]}
+              y={p[1]}
               width={8 / zoom}
               height={8 / zoom}
+              offsetX={4 / zoom}
+              offsetY={4 / zoom}
               fill="#fff"
               stroke={color}
               strokeWidth={1.5 / zoom}
@@ -594,8 +644,29 @@ export function CanvasStage() {
                   [minX, maxY],
                 ]);
               }}
-              onDragEnd={() => {
-                if (dragPts && dragId === anno.id) commit(dragPts);
+              onDragEnd={(e) => {
+                const raw = image
+                  ? clampPoint([e.target.x(), e.target.y()], image.width, image.height)
+                  : ([e.target.x(), e.target.y()] as Point);
+                const [nx, ny] = raw;
+                let minX = tl[0];
+                let maxX = br[0];
+                let minY = tl[1];
+                let maxY = br[1];
+                if (type === "n") minY = ny;
+                else if (type === "s") maxY = ny;
+                else if (type === "w") minX = nx;
+                else maxX = nx;
+                const finalPoints: [Point, Point, Point, Point] = [
+                  [minX, minY],
+                  [maxX, minY],
+                  [maxX, maxY],
+                  [minX, maxY],
+                ];
+                if (validResize(finalPoints)) commit(finalPoints);
+                else if (dragIdRef.current === anno.id && dragPtsRef.current) {
+                  commit(dragPtsRef.current);
+                }
               }}
             />
           ))}
@@ -696,38 +767,9 @@ export function CanvasStage() {
           <Layer>
             {view.boxes &&
               (() => {
-              // Render parents first (filled regions) then their children on
-              // top, and give children their parent's color so a region and its
-              // text/formula/table lines read as one visual group. Top-level
-              // boxes without children (single-mode output, manual boxes) keep
-              // the flat-index color they always had.
-              const childrenOf = new Map<string, typeof annos>();
-              for (const a of annos) {
-                if (!a.parentId) continue;
-                const arr = childrenOf.get(a.parentId) ?? [];
-                arr.push(a);
-                childrenOf.set(a.parentId, arr);
-              }
-              const ordered: typeof annos = [];
-              for (const a of annos) {
-                if (a.parentId) continue;
-                ordered.push(a);
-                const kids = childrenOf.get(a.id);
-                if (kids) ordered.push(...kids);
-              }
-              const colorOf = (a: (typeof annos)[number], i: number): string => {
-                if (a.parentId) {
-                  const parent = annos.find((p) => p.id === a.parentId);
-                  if (parent) {
-                    const pi = annos.filter((x) => !x.parentId).indexOf(parent);
-                    if (pi >= 0) return colorFor(pi);
-                  }
-                }
-                return colorFor(i);
-              };
-              return ordered.map((a, i) => {
+              return annos.map((a, i) => {
               if (a.hidden) return null;
-              const color = colorOf(a, i);
+              const color = colorFor(i);
               const b = bbox(a.points);
               const selected = selectedIds.includes(a.id);
               const hovered = hoveredId === a.id;
@@ -736,9 +778,6 @@ export function CanvasStage() {
               const emphasized = selected || (hovered && view.highlight);
               const lineStroke = emphasized ? stroke * 1.8 : stroke;
               const fillAlpha = emphasized ? 0.18 : 0.05;
-              // Children draw as thinner outlines so the parent region's fill
-              // stays dominant; parents keep the filled tint.
-              const isChild = !!a.parentId;
               // While dragging a vertex/resize handle on this annotation, show
               // the transient points so the outline tracks the pointer live.
               const livePts = dragPts && dragId === a.id ? dragPts : a.points;
@@ -748,26 +787,20 @@ export function CanvasStage() {
               return (
                   <Group
                   key={a.id}
-                  draggable={selected && tool === "select"}
+                  draggable={selected && tool === "select" && !busy}
                     onDragEnd={(e) => {
                       if (e.target !== e.currentTarget) return;
                       const dx = e.target.x();
                       const dy = e.target.y();
                       if (dx === 0 && dy === 0) return;
-                      // A region with children moves the whole tree in one
-                      // undo step; a childless box just shifts its own points.
-                      if (childrenOf.get(a.id)?.length) {
-                        moveAnnotationTree(a.id, dx, dy);
-                      } else {
-                        updateAnnotationPoints(
-                          a.id,
-                          a.points.map((p) =>
-                            image
-                              ? clampPoint([p[0] + dx, p[1] + dy], image.width, image.height)
-                              : ([p[0] + dx, p[1] + dy] as Point),
-                          ),
-                        );
-                      }
+                      updateAnnotationPoints(
+                        a.id,
+                        a.points.map((p) =>
+                          image
+                            ? clampPoint([p[0] + dx, p[1] + dy], image.width, image.height)
+                            : ([p[0] + dx, p[1] + dy] as Point),
+                        ),
+                      );
                     e.target.position({ x: 0, y: 0 });
                   }}
                   onMouseDown={(e) => {
@@ -786,11 +819,8 @@ export function CanvasStage() {
                     points={flat}
                     closed
                     stroke={color}
-                    // Children (text/formula/table lines inside a region) render
-                    // as a thinner outline so the parent region's fill stays
-                    // the dominant visual; parents keep the filled tint.
-                    strokeWidth={isChild ? lineStroke * 0.7 : lineStroke}
-                    fill={withAlpha(color, isChild && !emphasized ? fillAlpha * 0.5 : fillAlpha)}
+                    strokeWidth={lineStroke}
+                    fill={withAlpha(color, fillAlpha)}
                     hitStrokeWidth={Math.max(10, stroke * 4)}
                   />
                   {/* number tag */}
@@ -809,10 +839,7 @@ export function CanvasStage() {
                         y={numberTagY + 1 / zoom}
                         width={tagW}
                         height={tagH}
-                        // Reading-order mode tags each box with a logical index;
-                        // prefer it over the array position so the on-canvas
-                        // number matches the exported reading sequence.
-                        text={String((resultReadingIndex(a) ?? i) + 1)}
+                        text={String(i + 1)}
                         fontSize={tagFont}
                         fill="#fff"
                         align="center"
@@ -825,7 +852,7 @@ export function CanvasStage() {
                       everything else falls back to per-vertex editing. Both
                       paths preview through dragPts so the outline follows the
                       pointer live, committing only on dragEnd. */}
-                  {selected && tool === "select" && editHandlesFor(a, livePts, color)}
+                  {selected && tool === "select" && !busy && editHandlesFor(a, livePts, color)}
                 </Group>
               );
             });
@@ -896,7 +923,7 @@ export function CanvasStage() {
           <ContextMenuShortcut>{shortcut("Ctrl+C")}</ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuItem
-          disabled={!clipboardCount || !contextMenu.point}
+          disabled={busy || !clipboardCount || !contextMenu.point}
           onClick={() => {
             if (contextMenu.point) pasteAt(contextMenu.point);
           }}
@@ -916,7 +943,7 @@ export function CanvasStage() {
           {t(locale, "canvas.context.recognize")}
         </ContextMenuItem>
         <ContextMenuItem
-          disabled={!contextAnnotation}
+          disabled={busy || !contextAnnotation}
           onClick={() => {
             if (contextAnnotation) {
               setAnnotationHidden(contextAnnotation.id, true);
@@ -927,7 +954,7 @@ export function CanvasStage() {
           {t(locale, "canvas.context.hide")}
         </ContextMenuItem>
         <ContextMenuItem
-          disabled={!hasSelection}
+          disabled={busy || !hasSelection}
           onClick={() => {
             if (hasSelection) removeSelected();
           }}

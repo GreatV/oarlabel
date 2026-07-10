@@ -37,7 +37,7 @@ import { LINKS } from "@/lib/links";
 import { shortcut } from "@/lib/platform";
 import { openExternal, pickImages, pickPdf, win } from "@/lib/tauri";
 import { useStore } from "@/store";
-import { DEVICE_OPTIONS, THEME_OPTIONS, type Device, type Theme } from "@/types";
+import { DEFAULT_DEVICE_OPTIONS, THEME_OPTIONS, type Device, type Theme } from "@/types";
 import {
   Menubar,
   MenubarCheckboxItem,
@@ -85,6 +85,7 @@ export function MenuBar({
   const hasImage = !!s.currentImage();
   const hasSelection = s.selectedIds.length > 0;
   const modelOptions = s.modelOptions;
+  const deviceOptions = s.deviceOptions.length ? s.deviceOptions : DEFAULT_DEVICE_OPTIONS;
 
   const handleImportImages = async () => {
     const paths = await pickImages(t(l, "picker.images"), t(l, "picker.imageFilter"));
@@ -100,15 +101,15 @@ export function MenuBar({
       <MenubarMenu>
         <MenubarTrigger>{t(l, "menu.file")}</MenubarTrigger>
         <MenubarContent className="min-w-[12rem]">
-          <MenubarItem onClick={handleImportImages}>
+          <MenubarItem onClick={handleImportImages} disabled={s.busy}>
             <FileImage className={ico} />
             {t(l, "menu.file.importImages")}
           </MenubarItem>
-          <MenubarItem onClick={onOpen}>
+          <MenubarItem onClick={onOpen} disabled={s.busy}>
             <FolderOpen className={ico} />
             {t(l, "menu.file.importFolder")}
           </MenubarItem>
-          <MenubarItem onClick={handleImportPdf}>
+          <MenubarItem onClick={handleImportPdf} disabled={s.busy}>
             <FileText className={ico} />
             {t(l, "menu.file.importPdf")}
           </MenubarItem>
@@ -123,7 +124,7 @@ export function MenuBar({
                 <MenubarItem disabled>{t(l, "menu.file.noRecent")}</MenubarItem>
               ) : (
                 s.recentDirs.map((d) => (
-                  <MenubarItem key={d} onClick={() => s.openFolder(d)} title={d}>
+                  <MenubarItem key={d} disabled={s.busy} onClick={() => s.openFolder(d)} title={d}>
                     <span className="truncate">{baseName(d)}</span>
                   </MenubarItem>
                 ))
@@ -132,16 +133,22 @@ export function MenuBar({
           </MenubarSub>
 
           <MenubarSeparator />
-          <MenubarItem onClick={() => s.save()} disabled={!hasImage}>
+          <MenubarItem onClick={() => s.save()} disabled={!hasImage || s.busy}>
             <Save className={ico} />
             {t(l, "menu.file.save")}
             <MenubarShortcut>{shortcut("Ctrl+S")}</MenubarShortcut>
           </MenubarItem>
-          <MenubarItem onClick={() => void s.saveAndNext()} disabled={!hasImage}>
+          <MenubarItem onClick={() => void s.saveAndNext()} disabled={!hasImage || s.busy}>
             {t(l, "menu.file.saveAndNext")}
             <MenubarShortcut>{shortcut("Ctrl+Enter")}</MenubarShortcut>
           </MenubarItem>
-          <MenubarItem onClick={onExport} disabled={!s.images.length}>
+          <MenubarCheckboxItem
+            checked={s.autoSave}
+            onCheckedChange={(checked) => s.setAutoSave(checked === true)}
+          >
+            {t(l, "menu.file.autoSave")}
+          </MenubarCheckboxItem>
+          <MenubarItem onClick={onExport} disabled={!s.images.length || s.busy}>
             <Upload className={ico} />
             {t(l, "menu.file.export")}
           </MenubarItem>
@@ -340,7 +347,7 @@ export function MenuBar({
             </MenubarSubTrigger>
             <MenubarSubContent>
               <MenubarRadioGroup value={s.device} onValueChange={(v) => s.setDevice(v as Device)}>
-                {DEVICE_OPTIONS.map((o) => (
+                {deviceOptions.map((o) => (
                   <MenubarRadioItem key={o.key} value={o.key}>
                     {o.label}
                   </MenubarRadioItem>
@@ -377,7 +384,7 @@ export function MenuBar({
               <MenubarRadioGroup value={s.locale} onValueChange={(v) => s.setLocale(v as Locale)}>
                 {LOCALE_OPTIONS.map((o) => (
                   <MenubarRadioItem key={o.key} value={o.key}>
-                    {o.label}
+                    {t(l, o.labelKey)}
                   </MenubarRadioItem>
                 ))}
               </MenubarRadioGroup>

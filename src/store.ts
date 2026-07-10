@@ -6,6 +6,7 @@ import type {
   AnnotationResult,
   AnnotationShape,
   Device,
+  DeviceOption,
   FitMode,
   ImageAnnotationFile,
   ImageItem,
@@ -22,9 +23,10 @@ import type {
   Tool,
   ViewOptions,
 } from "@/types";
-import { t, tt, type Locale } from "@/i18n";
+import { modeLabel, t, tt, type Locale } from "@/i18n";
 import { resultLabel, resultText } from "@/types";
 import {
+  askSaveAndCompleteCurrent,
   api,
   confirmDiscardChanges,
   confirmReplaceAnnotations,
@@ -41,13 +43,13 @@ const LS = {
   ocrModel: "oarlabel.ocrModel",
   layoutModel: "oarlabel.layoutModel",
   formulaModel: "oarlabel.formulaModel",
-  tableModel: "oarlabel.tableModel",
   device: "oarlabel.device",
   locale: "oarlabel.locale",
   theme: "oarlabel.theme",
   recentDirs: "oarlabel.recentDirs",
   minBoxSize: "oarlabel.minBoxSize",
   inferenceTuning: "oarlabel.inferenceTuning",
+  autoSave: "oarlabel.autoSave",
 } as const;
 
 function loadLS<T>(key: string, fallback: T): T {
@@ -77,6 +79,41 @@ const DEFAULT_VIEW: ViewOptions = {
   highlight: true,
 };
 
+export function normalizeViewOptions(value: unknown): ViewOptions {
+  const source = isRecord(value) ? value : {};
+  return {
+    fileList: typeof source.fileList === "boolean" ? source.fileList : DEFAULT_VIEW.fileList,
+    results: typeof source.results === "boolean" ? source.results : DEFAULT_VIEW.results,
+    toolbar: typeof source.toolbar === "boolean" ? source.toolbar : DEFAULT_VIEW.toolbar,
+    statusBar: typeof source.statusBar === "boolean" ? source.statusBar : DEFAULT_VIEW.statusBar,
+    boxes: typeof source.boxes === "boolean" ? source.boxes : DEFAULT_VIEW.boxes,
+    labels: typeof source.labels === "boolean" ? source.labels : DEFAULT_VIEW.labels,
+    highlight: typeof source.highlight === "boolean" ? source.highlight : DEFAULT_VIEW.highlight,
+  };
+}
+
+function normalizeStoredString(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+
+export function normalizeStoredLocale(value: unknown): Locale {
+  return value === "en-US" || value === "zh-CN" ? value : "zh-CN";
+}
+
+export function normalizeRecentDirs(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const unique = new Set<string>();
+  for (const dir of value) {
+    if (typeof dir === "string" && dir.length > 0) unique.add(dir);
+    if (unique.size === MAX_RECENT) break;
+  }
+  return [...unique];
+}
+
+function normalizeStoredBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
 const EMPTY_ANNOTATIONS: Annotation[] = [];
 
 const MAX_RECENT = 8;
@@ -89,6 +126,12 @@ const DEFAULT_INFERENCE_TUNING: Required<InferenceTuning> = {
   layout: { score_threshold: 0.5, nms_threshold: 0.5, max_elements: 100 },
 };
 
+function appendSkipped(locale: Locale, message: string, skipped: number): string {
+  if (skipped <= 0) return message;
+  const separator = locale === "zh-CN" ? "，" : ", ";
+  return `${message}${separator}${tt(locale, "message.regionsSkipped", { skipped })}`;
+}
+
 function cloneAnno(a: Annotation): Annotation {
   return {
     id: a.id,
@@ -96,10 +139,12 @@ function cloneAnno(a: Annotation): Annotation {
     hidden: a.hidden,
     shape: a.shape,
     results: a.results.map((r) => ({ ...r, value: { ...r.value } })),
-    // Preserve parentId so paste can rebuild the parent-child tree. Dropping
-    // it silently defeats the remap in paste() (children become orphans).
-    parentId: a.parentId,
   };
+}
+
+interface HistorySnapshot {
+  annotations: Annotation[];
+  status: ImageStatus;
 }
 
 interface AppState {
@@ -110,9 +155,7 @@ interface AppState {
   selectedIds: string[];
   selectedId: string | null; // primary (last) selection, derived from selectedIds
   clipboard: Annotation[];
-  // Active annotation modes. Currently single-select, kept as an array for
-  // compatibility with stored state and backend payloads.
-  modes: Mode[];
+  mode: Mode;
   tool: Tool;
   zoom: number;
   busy: boolean;
@@ -123,29 +166,34 @@ interface AppState {
   batchTotal: number;
   batchDone: number;
   batchCancelRequested: boolean;
+  exportRunning: boolean;
+  exportTotal: number;
+  exportDone: number;
+  exportCancelRequested: boolean;
   models: ModelStatus[];
   modelOptions: ModelOptions | null;
+  deviceOptions: DeviceOption[];
 
   // view + model/device selection
   view: ViewOptions;
   ocrModel: string;
   layoutModel: string;
   formulaModel: string;
-  tableModel: string;
   device: Device;
   locale: Locale;
   theme: Theme;
   recentDirs: string[];
   minBoxSize: number;
   inferenceTuning: Required<InferenceTuning>;
+  autoSave: boolean;
 
   // canvas fit request (CanvasStage watches fitNonce)
   fitMode: FitMode | null;
   fitNonce: number;
 
   // history (per image path)
-  past: Record<string, Annotation[][]>;
-  future: Record<string, Annotation[][]>;
+  past: Record<string, HistorySnapshot[]>;
+  future: Record<string, HistorySnapshot[]>;
 
   // selectors
   currentImage: () => ImageItem | null;
@@ -158,7 +206,7 @@ interface AppState {
   selectIndex: (i: number) => Promise<void>;
   next: () => void;
   prev: () => void;
-  toggleMode: (m: Mode) => void;
+  setMode: (m: Mode) => void;
   setTool: (t: Tool) => void;
   setZoom: (z: number) => void;
   requestFit: (mode: FitMode) => void;
@@ -168,8 +216,6 @@ interface AppState {
 
   addAnnotation: (points: Point[], label?: string, shape?: AnnotationShape) => void;
   updateAnnotationPoints: (id: string, points: Point[]) => void;
-  /** Move a region together with its children by a delta (single undo step). */
-  moveAnnotationTree: (parentId: string, dx: number, dy: number) => void;
   setText: (id: string, text: string) => void;
   ensureTextResult: (id: string) => void;
   setAnnotationHidden: (id: string, hidden: boolean) => void;
@@ -192,47 +238,50 @@ interface AppState {
   setOcrModel: (key: string) => void;
   setLayoutModel: (key: string) => void;
   setFormulaModel: (key: string) => void;
-  setTableModel: (key: string) => void;
   setDevice: (device: Device) => void;
   setLocale: (locale: Locale) => void;
   setTheme: (theme: Theme) => void;
   setMinBoxSize: (size: number) => void;
   setInferenceTuning: (tuning: Required<InferenceTuning>) => void;
+  setAutoSave: (enabled: boolean) => void;
 
   preannotateCurrent: () => Promise<void>;
   preannotateAll: () => Promise<void>;
   requestBatchCancel: () => void;
   save: () => Promise<boolean>;
-  /** Save the current image, then advance to the next one (physical next,
-   *  ignoring status). No-op if the save fails. */
+  /** Save and mark the current image done, then advance to the next physical
+   *  image. No-op if the save fails. */
   saveAndNext: () => Promise<void>;
   exportableImages: () => Promise<
-    { path: string; boxes: { points: Point[]; transcription: string }[] }[]
+    { path: string; boxes: { points: Point[]; transcription: string }[] }[] | null
   >;
+  requestExportCancel: () => void;
 
   refreshModels: () => Promise<void>;
 }
 
 const MAX_HISTORY = 50;
+const LOAD_IPC_CONCURRENCY = 8;
+const DIMENSION_UPDATE_BATCH_SIZE = 64;
 
-// Coerce an unknown/stale stored device value back to a known one. localStorage
-// may hold a value from an older build (e.g. a renamed option); without this,
-// StatusBar's device lookup fell back to the raw string (fine now) but the
-// native device menu would also desync, so normalize at the source.
-const VALID_DEVICES: ReadonlySet<Device> = new Set(["auto", "cpu", "cuda"]);
-function normalizeDevice(d: Device): Device {
-  return VALID_DEVICES.has(d) ? d : "auto";
+// Coerce an unknown/stale stored device value back to a known one. Older builds
+// stored "auto", which was CPU in practice; normalize it to "cpu".
+const VALID_DEVICES: ReadonlySet<string> = new Set(["cpu", "cuda"]);
+function normalizeDevice(d: unknown): Device {
+  return typeof d === "string" && VALID_DEVICES.has(d) ? (d as Device) : "cpu";
 }
 
 // Coerce a stale/invalid stored theme back to a known value, mirroring
 // normalizeDevice so the theme switcher never breaks on a bad localStorage hit.
 const VALID_THEMES: ReadonlySet<Theme> = new Set(["light", "dark", "system"]);
-function normalizeTheme(theme: Theme): Theme {
-  return VALID_THEMES.has(theme) ? theme : "system";
+function normalizeTheme(theme: unknown): Theme {
+  return typeof theme === "string" && VALID_THEMES.has(theme as Theme)
+    ? (theme as Theme)
+    : "system";
 }
 
-function normalizeMinBoxSize(size: number): number {
-  if (!Number.isFinite(size)) return DEFAULT_MIN_BOX_SIZE;
+function normalizeMinBoxSize(size: unknown): number {
+  if (typeof size !== "number" || !Number.isFinite(size)) return DEFAULT_MIN_BOX_SIZE;
   return Math.min(
     MIN_BOX_SIZE_UPPER_BOUND,
     Math.max(MIN_BOX_SIZE_LOWER_BOUND, Math.round(size)),
@@ -245,10 +294,11 @@ function clampNumber(value: unknown, fallback: number, min: number, max: number)
   return Math.min(max, Math.max(min, n));
 }
 
-function normalizeInferenceTuning(value: Partial<InferenceTuning>): Required<InferenceTuning> {
-  const ocr = value.ocr ?? {};
-  const textRecognition = value.text_recognition ?? {};
-  const layout = value.layout ?? {};
+export function normalizeInferenceTuning(value: unknown): Required<InferenceTuning> {
+  const source = isRecord(value) ? value : {};
+  const ocr = isRecord(source.ocr) ? source.ocr : {};
+  const textRecognition = isRecord(source.text_recognition) ? source.text_recognition : {};
+  const layout = isRecord(source.layout) ? source.layout : {};
   return {
     ocr: {
       score_threshold: clampNumber(
@@ -312,56 +362,17 @@ function normalizeAnnotation(a: Annotation): Annotation {
     ...a,
     hidden: a.hidden === true,
     shape,
-    parentId: a.parentId ?? null,
   };
-}
-
-function annotationBBox(a: Pick<Annotation, "points">): {
-  x: number;
-  y: number;
-  maxX: number;
-  maxY: number;
-  area: number;
-} {
-  const xs = a.points.map((p) => p[0]);
-  const ys = a.points.map((p) => p[1]);
-  const x = Math.min(...xs);
-  const y = Math.min(...ys);
-  const maxX = Math.max(...xs);
-  const maxY = Math.max(...ys);
-  return { x, y, maxX, maxY, area: Math.max(0, maxX - x) * Math.max(0, maxY - y) };
-}
-
-function hasLayoutResult(a: Annotation): boolean {
-  return a.results.some((r) => r.task === "layout_detection");
-}
-
-function parentForManualLeaf(points: Point[], prev: Annotation[]): string | null {
-  const childBox = annotationBBox({ points });
-  let best: { id: string; area: number } | null = null;
-  for (const candidate of prev) {
-    if (candidate.parentId || !hasLayoutResult(candidate)) continue;
-    const box = annotationBBox(candidate);
-    const contains =
-      childBox.x >= box.x &&
-      childBox.y >= box.y &&
-      childBox.maxX <= box.maxX &&
-      childBox.maxY <= box.maxY;
-    if (!contains) continue;
-    if (!best || box.area < best.area) best = { id: candidate.id, area: box.area };
-  }
-  return best?.id ?? null;
 }
 
 /// Snapshot of the model/mode settings used for a (batch) pre-annotation run.
 /// Captured once at the start of a batch so all images in the run use the
 /// same config even if the user switches model or mode mid-run.
 interface PreannParams {
-  modes: Mode[];
+  mode: Mode;
   ocrModel: string;
   layoutModel: string;
   formulaModel: string;
-  tableModel: string;
   device: Device;
   thresholds: InferenceTuning | null;
 }
@@ -415,14 +426,11 @@ function normalizeAnnotationInput(value: unknown): Annotation | null {
   if (points.length < 2 || results.length === 0) return null;
   const shape =
     value.shape === "rect" || value.shape === "polygon" ? value.shape : inferShape(points);
-  const parentId =
-    typeof value.parentId === "string" ? value.parentId : value.parentId === null ? null : null;
   return normalizeAnnotation({
     id: typeof value.id === "string" && value.id ? value.id : uid(),
     points,
     hidden: value.hidden === true,
     shape,
-    parentId,
     results,
   });
 }
@@ -451,6 +459,26 @@ function currentLabel(mode: Mode, explicit?: string): string {
   if (mode === "formula") return "formula";
   if (mode === "layout") return "layout";
   return "text";
+}
+
+/** Restrict bulk recognition to annotations produced for the active task.
+ * Explicit single/selection recognition remains available as an intentional
+ * conversion workflow, but "recognize all" must never reinterpret unrelated
+ * layout/formula regions or annotations hidden by the user. */
+function isBulkRecognitionTarget(annotation: Annotation, mode: Mode): boolean {
+  if (annotation.hidden) return false;
+  if (mode === "ocr") {
+    return annotation.results.some((result) => result.task === "text_detection");
+  }
+  if (mode === "formula") {
+    return annotation.results.some(
+      (result) =>
+        result.task === "layout_detection" &&
+        typeof result.value.label === "string" &&
+        result.value.label.trim().toLowerCase() === "formula",
+    );
+  }
+  return false;
 }
 
 function manualResults(label: string): AnnotationResult[] {
@@ -517,8 +545,7 @@ function setTextResult(a: Annotation, text: string): Annotation {
 /** Rewrite a region's category label. The label lives on the
  *  `layout_detection` result's `value.label`; if absent (e.g. a hand-drawn box
  *  that only has text_detection), append a fresh manual layout_detection entry.
- *  Other results (text_recognition for formula/table LaTeX, reading_order, etc.)
- *  are preserved verbatim. */
+ *  Other results, including formula text recognition, are preserved verbatim. */
 function setLabelResult(a: Annotation, label: string): Annotation {
   let found = false;
   const results = a.results.map((r) => {
@@ -638,28 +665,15 @@ function setAutoFormulaResult(a: Annotation, latex: string, score: number | null
   return { ...a, results };
 }
 
-interface AnnoOpts {
-  /** Parent region id, for children produced by the structured pipeline. */
-  parentId?: string | null;
-  /** Stable editing shape. Four-point detector boxes are rect-like even when
-   *  slightly tilted, so the default shape inference is point-count based. */
-  shape?: AnnotationShape;
-  /** Explicit id (normally a fresh uid; the structured pipeline passes its own
-   *  so the linkage `parentId` can reference a region's id). */
-  id?: string;
-}
-
 function textAnnotation(
   points: Point[],
   text: string,
   score: number | null,
-  opts: AnnoOpts = {},
 ): Annotation {
   return {
-    id: opts.id ?? uid(),
+    id: uid(),
     points,
-    shape: opts.shape ?? inferShape(points),
-    parentId: opts.parentId ?? null,
+    shape: inferShape(points),
     results: [
       {
         task: "text_detection",
@@ -677,42 +691,15 @@ function textAnnotation(
   };
 }
 
-// OCR text region plus a reading-order position. Boxes arrive from the backend
-// already sorted into reading order, so `index` is just the array position.
-function readingOrderAnnotation(
-  points: Point[],
-  text: string,
-  index: number,
-  score: number | null,
-  opts: AnnoOpts = {},
-): Annotation {
-  const base = textAnnotation(points, text, score, opts);
-  return withReadingOrder(base, index);
-}
-
-function withReadingOrder(a: Annotation, index: number): Annotation {
-  return {
-    ...a,
-    results: a.results.concat({
-      task: "reading_order",
-      value: { index },
-      score: null,
-      source: "auto",
-    }),
-  };
-}
-
 function layoutAnnotation(
   points: Point[],
   label: string,
   score: number | null,
-  opts: AnnoOpts = {},
 ): Annotation {
   return {
-    id: opts.id ?? uid(),
+    id: uid(),
     points,
-    shape: opts.shape ?? inferShape(points),
-    parentId: opts.parentId ?? null,
+    shape: inferShape(points),
     results: [
       {
         task: "layout_detection",
@@ -729,13 +716,11 @@ function recognizedLayoutAnnotation(
   label: string,
   text: string,
   score: number | null,
-  opts: AnnoOpts = {},
 ): Annotation {
   return {
-    id: opts.id ?? uid(),
+    id: uid(),
     points,
-    shape: opts.shape ?? inferShape(points),
-    parentId: opts.parentId ?? null,
+    shape: inferShape(points),
     results: [
       {
         task: "layout_detection",
@@ -758,6 +743,30 @@ export const useStore = create<AppState>((set, get) => {
     return parseAnnotationFile(await api.readAnnotation(path));
   }
 
+  async function mapLimited<T, R>(
+    items: T[],
+    limit: number,
+    mapper: (item: T, index: number) => Promise<R>,
+    shouldContinue: () => boolean = () => true,
+  ): Promise<R[]> {
+    const results = new Array<R>(items.length);
+    let next = 0;
+    const workerCount = Math.min(Math.max(1, limit), items.length);
+
+    await Promise.all(
+      Array.from({ length: workerCount }, async () => {
+        while (shouldContinue()) {
+          const index = next;
+          next += 1;
+          if (index >= items.length) return;
+          results[index] = await mapper(items[index], index);
+        }
+      }),
+    );
+
+    return results;
+  }
+
   // Race guard for opening a workspace. The token is minted at the very start
   // of each open (openFolder / openFiles / openPdf), BEFORE any IPC, so that a
   // slow earlier open can never win over a newer one: if open-A's IPC returns
@@ -774,45 +783,126 @@ export const useStore = create<AppState>((set, get) => {
   // self-consistent: a mid-run model/mode switch won't mix configs across
   // images.
   function snapshotPreannParams(): PreannParams {
-    const {
-      modes,
-      ocrModel,
-      layoutModel,
-      formulaModel,
-      tableModel,
-      device,
-      inferenceTuning,
-    } = get();
+    const { mode, ocrModel, layoutModel, formulaModel, device, inferenceTuning } = get();
     return {
-      modes,
+      mode,
       ocrModel,
       layoutModel,
       formulaModel,
-      tableModel,
       device,
       thresholds: {
         ocr: inferenceTuning.ocr,
         text_recognition: inferenceTuning.text_recognition,
+        layout: inferenceTuning.layout,
       },
     };
   }
 
-  async function saveImageFile(path: string, finalStatus: ImageStatus): Promise<void> {
+  async function saveImageFile(path: string, status: ImageStatus): Promise<void> {
     const state = get();
     if (!state.images.some((it) => it.path === path)) return;
     let annotations = state.annos[path];
     if (!annotations) {
       annotations = (await loadImageFile(path)).annotations;
     }
-    // Write the final status to disk so it matches the in-memory value after
-    // save. The previous version wrote the live (pre-done) status here and
-    // then flipped the memory state, so re-opening the folder lost "done".
     const data: ImageAnnotationFile = {
       version: 1,
-      status: finalStatus,
+      status,
       annotations,
     };
     await api.saveAnnotation(path, JSON.stringify(data, null, 2));
+  }
+
+  async function saveCurrentImage(status?: ImageStatus): Promise<boolean> {
+    if (get().busy) return false;
+    const img = get().currentImage();
+    if (!img) return true;
+    const locale = get().locale;
+    const nextStatus = status ?? img.status;
+    set({ busy: true, statusMsg: t(locale, "message.saving") });
+    try {
+      await saveImageFile(img.path, nextStatus);
+      set((s) => {
+        const dirtyPaths = { ...s.dirtyPaths };
+        delete dirtyPaths[img.path];
+        return {
+          dirty: Object.keys(dirtyPaths).length > 0,
+          dirtyPaths,
+          images: s.images.map((it) =>
+            it.path === img.path ? { ...it, status: nextStatus } : it,
+          ),
+          statusMsg: t(locale, "message.currentImageSaved"),
+        };
+      });
+      return true;
+    } catch (e) {
+      set({ statusMsg: `${t(locale, "message.saveFailed")}: ${String(e)}` });
+      return false;
+    } finally {
+      set({ busy: false });
+    }
+  }
+
+  async function saveImageAfterBatchPreannotation(path: string): Promise<void> {
+    const img = get().images.find((it) => it.path === path);
+    if (!img) return;
+    await saveImageFile(path, img.status);
+    set((s) => {
+      const dirtyPaths = { ...s.dirtyPaths };
+      delete dirtyPaths[path];
+      const isCurrent = s.currentImage()?.path === path;
+      const annos = { ...s.annos };
+      const past = { ...s.past };
+      const future = { ...s.future };
+      // The saved sidecar is now the source of truth. Release non-current
+      // batch results and their undo stacks so a large batch does not retain
+      // every image's annotations and up to 50 history snapshots in memory.
+      if (!isCurrent) {
+        delete annos[path];
+        delete past[path];
+        delete future[path];
+      }
+      return {
+        annos,
+        past,
+        future,
+        dirty: Object.keys(dirtyPaths).length > 0,
+        dirtyPaths,
+      };
+    });
+  }
+
+  function shouldPromptSaveAndCompleteCurrent(targetIndex: number): boolean {
+    const state = get();
+    if (targetIndex === state.currentIndex) return false;
+    const img = state.currentImage();
+    if (!img || img.status === "done") return false;
+    const annos = state.annos[img.path] ?? [];
+    return !!state.dirtyPaths[img.path] || annos.length > 0;
+  }
+
+  async function prepareCurrentImageForSwitch(targetIndex: number): Promise<boolean> {
+    if (targetIndex === get().currentIndex) return true;
+    const state = get();
+    const img = state.currentImage();
+    if (state.autoSave) {
+      return img && state.dirtyPaths[img.path] ? saveCurrentImage() : true;
+    }
+    if (!shouldPromptSaveAndCompleteCurrent(targetIndex)) return true;
+    let shouldSave: boolean;
+    set({ busy: true });
+    try {
+      shouldSave = await askSaveAndCompleteCurrent(get().locale);
+    } catch (error) {
+      set({ statusMsg: `${t(get().locale, "message.saveFailed")}: ${String(error)}` });
+      return false;
+    } finally {
+      set({ busy: false });
+    }
+    if (shouldSave) {
+      return saveCurrentImage("done");
+    }
+    return true;
   }
 
   async function canDiscardDirty(): Promise<boolean> {
@@ -832,15 +922,14 @@ export const useStore = create<AppState>((set, get) => {
     return loadImageFile(path);
   }
 
-  async function annotationsForPath(path: string): Promise<Annotation[]> {
+  async function annotationCountForPath(path: string): Promise<number> {
     const loaded = get().annos[path];
-    if (loaded) return loaded;
-    const file = await loadImageFile(path);
-    set((s) => ({ annos: { ...s.annos, [path]: file.annotations } }));
-    return file.annotations;
+    if (loaded) return loaded.length;
+    return (await loadImageFile(path)).annotations.length;
   }
 
   async function recognizeTextForAnnotations(annotations: Annotation[]): Promise<void> {
+    if (get().busy) return;
     const img = get().currentImage();
     const locale = get().locale;
     if (!img) return;
@@ -866,19 +955,19 @@ export const useStore = create<AppState>((set, get) => {
       );
       if (result.regions.length) {
         const recognized = new Map(result.regions.map((r) => [r.id, r]));
-        mutate((prev) =>
-          prev.map((a) => {
-            const r = recognized.get(a.id);
-            return r ? setAutoTextResult(a, r.text, r.score) : a;
-          }),
+        mutate(
+          (prev) =>
+            prev.map((a) => {
+              const r = recognized.get(a.id);
+              return r ? setAutoTextResult(a, r.text, r.score) : a;
+            }),
+          { allowDuringBusy: true },
         );
       }
-      const skipped =
-        result.skipped > 0 ? `, ${tt(locale, "message.regionsSkipped", { skipped: result.skipped })}` : "";
       set({
-        statusMsg: `${tt(locale, "message.recognizeTextComplete", {
+        statusMsg: appendSkipped(locale, tt(locale, "message.recognizeTextComplete", {
           count: result.regions.length,
-        })}${skipped}`,
+        }), result.skipped),
       });
     } catch (e) {
       set({ statusMsg: `${t(locale, "message.recognizeTextFailed")}: ${String(e)}` });
@@ -888,6 +977,7 @@ export const useStore = create<AppState>((set, get) => {
   }
 
   async function recognizeFormulaForAnnotations(annotations: Annotation[]): Promise<void> {
+    if (get().busy) return;
     const img = get().currentImage();
     const locale = get().locale;
     if (!img) return;
@@ -910,19 +1000,19 @@ export const useStore = create<AppState>((set, get) => {
       );
       if (result.regions.length) {
         const recognized = new Map(result.regions.map((r) => [r.id, r]));
-        mutate((prev) =>
-          prev.map((a) => {
-            const r = recognized.get(a.id);
-            return r ? setAutoFormulaResult(a, r.text, r.score) : a;
-          }),
+        mutate(
+          (prev) =>
+            prev.map((a) => {
+              const r = recognized.get(a.id);
+              return r ? setAutoFormulaResult(a, r.text, r.score) : a;
+            }),
+          { allowDuringBusy: true },
         );
       }
-      const skipped =
-        result.skipped > 0 ? `，${tt(locale, "message.regionsSkipped", { skipped: result.skipped })}` : "";
       set({
-        statusMsg: `${tt(locale, "message.recognizeFormulaComplete", {
+        statusMsg: appendSkipped(locale, tt(locale, "message.recognizeFormulaComplete", {
           count: result.regions.length,
-        })}${skipped}`,
+        }), result.skipped),
       });
     } catch (e) {
       set({ statusMsg: `${t(locale, "message.recognizeFormulaFailed")}: ${String(e)}` });
@@ -935,59 +1025,58 @@ export const useStore = create<AppState>((set, get) => {
     path: string,
     params: PreannParams = snapshotPreannParams(),
   ): Promise<{ annos: Annotation[]; skipped: number }> {
-    const { modes, ocrModel, layoutModel, formulaModel, tableModel, device, thresholds } = params;
+    const { mode, ocrModel, layoutModel, formulaModel, device, thresholds } = params;
     const locale = get().locale;
-    const mode = modes[0] ?? "ocr";
     const result: PreannResult = await api.preannotate(
       path,
       mode,
       ocrModel,
       layoutModel,
       formulaModel,
-      tableModel,
       device,
-      modes,
       thresholds,
     );
     const boxes: PreannBox[] = result.boxes;
     const annos = boxes.map<Annotation>((b) => {
-      const parentId = b.parent_id ?? null;
       const label = b.label ?? null;
       if (mode === "layout") {
-        const anno = layoutAnnotation(b.points, label ?? "region", b.score, { parentId });
-        return b.order != null ? withReadingOrder(anno, b.order) : anno;
+        return layoutAnnotation(b.points, label ?? "region", b.score);
       }
       if (mode === "formula") {
-        if (b.text == null) throw new Error(tt(locale, "message.resultMissingText", { mode }));
-        return recognizedLayoutAnnotation(b.points, label ?? "formula", b.text, b.score, {
-          parentId,
-        });
+        if (b.text == null) {
+          throw new Error(
+            tt(locale, "message.resultMissingText", { mode: modeLabel(locale, mode) }),
+          );
+        }
+        return recognizedLayoutAnnotation(b.points, label ?? "formula", b.text, b.score);
       }
       if (b.text == null) throw new Error(t(locale, "message.ocrMissingText"));
-      if (b.order != null) {
-        return readingOrderAnnotation(b.points, b.text, b.order, b.score, { parentId });
-      }
-      return textAnnotation(b.points, b.text, b.score, { parentId });
+      return textAnnotation(b.points, b.text, b.score);
     });
     return { annos, skipped: result.skipped };
   }
 
   function applyPreannotation(path: string, annos: Annotation[]): void {
-    set((s) => ({
-      annos: { ...s.annos, [path]: annos },
-      past: {
-        ...s.past,
-        [path]: (s.past[path] ?? []).concat([s.annos[path] ?? []]).slice(-MAX_HISTORY),
-      },
-      future: { ...s.future, [path]: [] },
-      images: s.images.map((it) =>
-        it.path === path && it.status === "pending"
-          ? { ...it, status: "preannotated" as ImageStatus }
-          : it,
-      ),
-      dirty: true,
-      dirtyPaths: { ...s.dirtyPaths, [path]: true },
-    }));
+    set((s) => {
+      const isCurrent = s.currentImage()?.path === path;
+      const currentStatus = s.images.find((image) => image.path === path)?.status ?? "pending";
+      return {
+        annos: { ...s.annos, [path]: annos },
+        past: {
+          ...s.past,
+          [path]: (s.past[path] ?? [])
+            .concat([{ annotations: s.annos[path] ?? [], status: currentStatus }])
+            .slice(-MAX_HISTORY),
+        },
+        future: { ...s.future, [path]: [] },
+        images: s.images.map((it) =>
+          it.path === path ? { ...it, status: "preannotated" as ImageStatus } : it,
+        ),
+        dirty: true,
+        dirtyPaths: { ...s.dirtyPaths, [path]: true },
+        ...(isCurrent ? { selectedIds: [], selectedId: null } : {}),
+      };
+    });
   }
 
   /** Shared loader for a freshly-resolved image list (folder / files / pdf). */
@@ -997,15 +1086,18 @@ export const useStore = create<AppState>((set, get) => {
     label: string,
     token: LoadToken,
   ): Promise<void> {
-    const images: ImageItem[] = await Promise.all(
-      raw.map(async (r) => {
+    const images: ImageItem[] = await mapLimited(
+      raw,
+      LOAD_IPC_CONCURRENCY,
+      async (r) => {
         try {
           const file = await loadImageFile(r.path);
           return { ...r, status: file.status };
         } catch {
           return { ...r, status: "pending" as ImageStatus };
         }
-      }),
+      },
+      () => isCurrentLoad(token),
     );
     if (!isCurrentLoad(token)) return; // a newer open superseded this one
     set({
@@ -1031,21 +1123,43 @@ export const useStore = create<AppState>((set, get) => {
         ),
       }));
     }
-    // lazily fill in dimensions; each callback re-checks the token so a stale
-    // resolution can't mutate a newer workspace's image list.
-    for (let i = 0; i < images.length; i++) {
-      api
-        .imageSize(images[i].path)
-        .then(([w, h]) => {
+    void loadImageDimensions(images, token);
+  }
+
+  async function loadImageDimensions(images: ImageItem[], token: LoadToken): Promise<void> {
+    let pending = new Map<string, { width: number; height: number }>();
+
+    const flush = () => {
+      if (!pending.size || !isCurrentLoad(token)) {
+        pending.clear();
+        return;
+      }
+      const updates = pending;
+      pending = new Map();
+      set((s) => ({
+        images: s.images.map((it) => {
+          const size = updates.get(it.path);
+          return size ? { ...it, width: size.width, height: size.height } : it;
+        }),
+      }));
+    };
+
+    await mapLimited(
+      images,
+      LOAD_IPC_CONCURRENCY,
+      async (img) => {
+        try {
+          const [width, height] = await api.imageSize(img.path);
           if (!isCurrentLoad(token)) return;
-          set((s) => ({
-            images: s.images.map((it) =>
-              it.path === images[i].path ? { ...it, width: w, height: h } : it,
-            ),
-          }));
-        })
-        .catch(() => {});
-    }
+          pending.set(img.path, { width, height });
+          if (pending.size >= DIMENSION_UPDATE_BATCH_SIZE) flush();
+        } catch {
+          // Ignore unreadable dimensions; the image can still be listed.
+        }
+      },
+      () => isCurrentLoad(token),
+    );
+    flush();
   }
 
   function pushRecent(dir: string): void {
@@ -1055,18 +1169,23 @@ export const useStore = create<AppState>((set, get) => {
   }
 
   /** Mutate the current image's annotations with undo bookkeeping. */
-  function mutate(producer: (prev: Annotation[]) => Annotation[]) {
+  function mutate(
+    producer: (prev: Annotation[]) => Annotation[],
+    options: { allowDuringBusy?: boolean } = {},
+  ): boolean {
+    if (get().busy && !options.allowDuringBusy) return false;
     const img = get().currentImage();
-    if (!img) return;
+    if (!img) return false;
     const path = img.path;
     set((s) => {
       const prev = s.annos[path] ?? [];
       const nextArr = producer(prev);
-      const past = (s.past[path] ?? []).concat([prev]).slice(-MAX_HISTORY);
+      const currentStatus = s.images.find((item) => item.path === path)?.status ?? img.status;
+      const past = (s.past[path] ?? [])
+        .concat([{ annotations: prev, status: currentStatus }])
+        .slice(-MAX_HISTORY);
       const images = s.images.map((it) =>
-        it.path === path && it.status !== "done"
-          ? { ...it, status: "labeling" as ImageStatus }
-          : it,
+        it.path === path ? { ...it, status: "labeling" as ImageStatus } : it,
       );
       return {
         annos: { ...s.annos, [path]: nextArr },
@@ -1077,6 +1196,7 @@ export const useStore = create<AppState>((set, get) => {
         dirtyPaths: { ...s.dirtyPaths, [path]: true },
       };
     });
+    return true;
   }
 
   return {
@@ -1087,7 +1207,7 @@ export const useStore = create<AppState>((set, get) => {
     selectedIds: [],
     selectedId: null,
     clipboard: [],
-    modes: ["ocr"],
+    mode: "ocr",
     tool: "select",
     zoom: 1,
     busy: false,
@@ -1099,22 +1219,33 @@ export const useStore = create<AppState>((set, get) => {
     batchTotal: 0,
     batchDone: 0,
     batchCancelRequested: false,
+    exportRunning: false,
+    exportTotal: 0,
+    exportDone: 0,
+    exportCancelRequested: false,
     models: [],
     modelOptions: null,
+    deviceOptions: [],
 
-    view: loadLS<ViewOptions>(LS.view, DEFAULT_VIEW),
-    ocrModel: loadLS<string>(LS.ocrModel, "ppocrv6_tiny"),
-    layoutModel: loadLS<string>(LS.layoutModel, "layout_doc_v3"),
-    formulaModel: loadLS<string>(LS.formulaModel, "pp_formulanet_plus_s"),
-    tableModel: loadLS<string>(LS.tableModel, "slanet_plus"),
-    device: normalizeDevice(loadLS<Device>(LS.device, "auto")),
-    locale: loadLS<Locale>(LS.locale, "zh-CN"),
-    theme: normalizeTheme(loadLS<Theme>(LS.theme, "system")),
-    recentDirs: loadLS<string[]>(LS.recentDirs, []),
-    minBoxSize: normalizeMinBoxSize(loadLS<number>(LS.minBoxSize, DEFAULT_MIN_BOX_SIZE)),
-    inferenceTuning: normalizeInferenceTuning(
-      loadLS<Partial<InferenceTuning>>(LS.inferenceTuning, DEFAULT_INFERENCE_TUNING),
+    view: normalizeViewOptions(loadLS<unknown>(LS.view, DEFAULT_VIEW)),
+    ocrModel: normalizeStoredString(loadLS<unknown>(LS.ocrModel, null), "ppocrv6_tiny"),
+    layoutModel: normalizeStoredString(
+      loadLS<unknown>(LS.layoutModel, null),
+      "layout_doc_v3",
     ),
+    formulaModel: normalizeStoredString(
+      loadLS<unknown>(LS.formulaModel, null),
+      "pp_formulanet_plus_s",
+    ),
+    device: normalizeDevice(loadLS<unknown>(LS.device, "cpu")),
+    locale: normalizeStoredLocale(loadLS<unknown>(LS.locale, "zh-CN")),
+    theme: normalizeTheme(loadLS<unknown>(LS.theme, "system")),
+    recentDirs: normalizeRecentDirs(loadLS<unknown>(LS.recentDirs, [])),
+    minBoxSize: normalizeMinBoxSize(loadLS<unknown>(LS.minBoxSize, DEFAULT_MIN_BOX_SIZE)),
+    inferenceTuning: normalizeInferenceTuning(
+      loadLS<unknown>(LS.inferenceTuning, DEFAULT_INFERENCE_TUNING),
+    ),
+    autoSave: normalizeStoredBoolean(loadLS<unknown>(LS.autoSave, false), false),
 
     fitMode: null,
     fitNonce: 0,
@@ -1134,6 +1265,7 @@ export const useStore = create<AppState>((set, get) => {
     },
 
     openFolder: async (dir) => {
+      if (get().busy) return;
       // Mint the load token BEFORE the discard-prompt and any IPC: a second
       // open started while this one is awaiting would mint a newer token and
       // cause every guarded step below (including finally) to no-op for this.
@@ -1164,6 +1296,7 @@ export const useStore = create<AppState>((set, get) => {
 
     openFiles: async (paths) => {
       if (!paths.length) return;
+      if (get().busy) return;
       const token = beginLoad();
       if (!(await canDiscardDirty())) return;
       if (!isCurrentLoad(token)) return;
@@ -1182,6 +1315,7 @@ export const useStore = create<AppState>((set, get) => {
     },
 
     openPdf: async (pdfPath) => {
+      if (get().busy) return;
       const token = beginLoad();
       if (!(await canDiscardDirty())) return;
       if (!isCurrentLoad(token)) return;
@@ -1200,8 +1334,10 @@ export const useStore = create<AppState>((set, get) => {
     },
 
     selectIndex: async (i) => {
+      if (get().busy) return;
       const { images } = get();
       if (i < 0 || i >= images.length) return;
+      if (!(await prepareCurrentImageForSwitch(i))) return;
       const img = images[i];
       set({ currentIndex: i, selectedIds: [], selectedId: null });
       if (get().annos[img.path]) return;
@@ -1224,7 +1360,7 @@ export const useStore = create<AppState>((set, get) => {
       void get().selectIndex(get().currentIndex - 1);
     },
 
-    toggleMode: (mode) => set({ modes: [mode], selectedIds: [], selectedId: null }),
+    setMode: (mode) => set({ mode, selectedIds: [], selectedId: null }),
     setTool: (tool) => set({ tool }),
     setZoom: (zoom) => set({ zoom: Math.min(8, Math.max(0.1, zoom)) }),
     requestFit: (mode) => set((s) => ({ fitMode: mode, fitNonce: s.fitNonce + 1 })),
@@ -1254,39 +1390,22 @@ export const useStore = create<AppState>((set, get) => {
 
     addAnnotation: (points, label, shape) => {
       const id = uid();
-      const primary = get().modes[get().modes.length - 1];
+      const primary = get().mode;
       const resultLabel = currentLabel(primary, label);
-      mutate((prev) => {
-        const parentId =
-          resultLabel === "layout" ? null : parentForManualLeaf(points, prev);
-        return prev.concat({
+      const added = mutate((prev) =>
+        prev.concat({
           id,
           points,
           shape: shape ?? inferShape(points),
-          parentId,
           results: manualResults(resultLabel),
-        });
-      });
-      set({ selectedIds: [id], selectedId: id });
+        }),
+      );
+      if (added) set({ selectedIds: [id], selectedId: id });
     },
     updateAnnotationPoints: (id, points) =>
       mutate((prev) =>
         prev.map((a) => (a.id === id ? { ...markGeometryManual(a), points } : a)),
       ),
-    moveAnnotationTree: (parentId, dx, dy) => {
-      if (dx === 0 && dy === 0) return;
-      mutate((prev) =>
-        prev.map((a) =>
-          // The region itself and every child whose parentId points at it.
-          a.id === parentId || a.parentId === parentId
-            ? {
-                ...markGeometryManual(a),
-                points: a.points.map((p) => [p[0] + dx, p[1] + dy] as Point),
-              }
-            : a,
-        ),
-      );
-    },
     setText: (id, text) => {
       const current = get().currentAnnos().find((a) => a.id === id);
       const hasText = current?.results.some((r) => r.task === "text_recognition") ?? false;
@@ -1309,32 +1428,23 @@ export const useStore = create<AppState>((set, get) => {
       mutate((prev) => prev.map((a) => (a.id === id ? setLabelResult(a, label) : a)));
     },
     removeAnnotation: (id) => {
-      // Cascade: removing a region also drops its children.
-      mutate((prev) => prev.filter((a) => a.id !== id && a.parentId !== id));
+      const removed = mutate((prev) => prev.filter((a) => a.id !== id));
+      if (!removed) return;
       set((s) => {
-        const ids = s.selectedIds.filter((x) => x !== id);
+        const ids = s.selectedIds.filter((selectedId) => selectedId !== id);
         return { selectedIds: ids, selectedId: ids.length ? ids[ids.length - 1] : null };
       });
     },
     removeSelected: () => {
       const ids = new Set(get().selectedIds);
       if (!ids.size) return;
-      // Cascade: any selected region removes its children too.
-      mutate((prev) =>
-        prev.filter((a) => !ids.has(a.id) && !(a.parentId && ids.has(a.parentId))),
-      );
-      set({ selectedIds: [], selectedId: null });
+      const removed = mutate((prev) => prev.filter((a) => !ids.has(a.id)));
+      if (removed) set({ selectedIds: [], selectedId: null });
     },
     copySelection: () => {
       const ids = new Set(get().selectedIds);
       if (!ids.size) return;
-      const all = get().currentAnnos();
-      // When a parent is selected, bring its children along so paste can
-      // reconstruct the tree. Selected children are included directly.
-      const selected = all.filter((a) => ids.has(a.id));
-      const childOfSelected = new Set(selected.map((a) => a.id));
-      const children = all.filter((a) => a.parentId && childOfSelected.has(a.parentId));
-      const copied = [...selected, ...children].map(cloneAnno);
+      const copied = get().currentAnnos().filter((a) => ids.has(a.id)).map(cloneAnno);
       if (copied.length) {
         set({ clipboard: copied, statusMsg: tt(get().locale, "message.copiedBoxes", { count: copied.length }) });
       }
@@ -1357,28 +1467,24 @@ export const useStore = create<AppState>((set, get) => {
       const minY = Math.min(...allPoints.map((p) => p[1]));
       const dx = anchor ? anchor[0] - minX : 8;
       const dy = anchor ? anchor[1] - minY : 8;
-      // Re-id parents first, then remap children's parentId to the new ids.
-      const idMap = new Map<string, string>();
       const newIds: string[] = [];
-      for (const a of clip) {
-        idMap.set(a.id, uid());
-      }
-      mutate((prev) =>
+      const pasted = mutate((prev) =>
         prev.concat(
           clip.map((a) => {
-            const id = idMap.get(a.id)!;
+            const id = uid();
             newIds.push(id);
             const cloned = cloneAnno(a);
             return {
               ...cloned,
               id,
-              parentId: a.parentId ? (idMap.get(a.parentId) ?? null) : null,
               points: cloned.points.map((p) => [p[0] + dx, p[1] + dy] as Point),
             };
           }),
         ),
       );
-      set({ selectedIds: newIds, selectedId: newIds[newIds.length - 1] ?? null });
+      if (pasted) {
+        set({ selectedIds: newIds, selectedId: newIds[newIds.length - 1] ?? null });
+      }
     },
     recognizeSelectedText: async () => {
       const selected = new Set(get().selectedIds);
@@ -1387,15 +1493,18 @@ export const useStore = create<AppState>((set, get) => {
         return;
       }
       const annotations = get().currentAnnos().filter((a) => selected.has(a.id));
-      if (get().modes[0] === "formula") {
+      if (get().mode === "formula") {
         await recognizeFormulaForAnnotations(annotations);
       } else {
         await recognizeTextForAnnotations(annotations);
       }
     },
     recognizeAllTextBoxes: async () => {
-      const annotations = get().currentAnnos();
-      if (get().modes[0] === "formula") {
+      const mode = get().mode;
+      const annotations = get()
+        .currentAnnos()
+        .filter((annotation) => isBulkRecognitionTarget(annotation, mode));
+      if (mode === "formula") {
         await recognizeFormulaForAnnotations(annotations);
       } else {
         await recognizeTextForAnnotations(annotations);
@@ -1403,6 +1512,7 @@ export const useStore = create<AppState>((set, get) => {
     },
 
     undo: () => {
+      if (get().busy) return;
       const img = get().currentImage();
       if (!img) return;
       const path = img.path;
@@ -1410,31 +1520,54 @@ export const useStore = create<AppState>((set, get) => {
         const past = s.past[path] ?? [];
         if (!past.length) return {};
         const prev = past[past.length - 1];
-        const cur = s.annos[path] ?? [];
+        const currentStatus = s.images.find((item) => item.path === path)?.status ?? img.status;
+        const cur: HistorySnapshot = {
+          annotations: s.annos[path] ?? [],
+          status: currentStatus,
+        };
+        const validIds = new Set(prev.annotations.map((annotation) => annotation.id));
+        const selectedIds = s.selectedIds.filter((id) => validIds.has(id));
         return {
-          annos: { ...s.annos, [path]: prev },
+          annos: { ...s.annos, [path]: prev.annotations },
           past: { ...s.past, [path]: past.slice(0, -1) },
           future: { ...s.future, [path]: (s.future[path] ?? []).concat([cur]) },
+          images: s.images.map((item) =>
+            item.path === path ? { ...item, status: prev.status } : item,
+          ),
           dirty: true,
           dirtyPaths: { ...s.dirtyPaths, [path]: true },
+          selectedIds,
+          selectedId: selectedIds[selectedIds.length - 1] ?? null,
         };
       });
     },
     redo: () => {
+      if (get().busy) return;
       const img = get().currentImage();
       if (!img) return;
       const path = img.path;
       set((s) => {
         const future = s.future[path] ?? [];
         if (!future.length) return {};
-        const nextArr = future[future.length - 1];
-        const cur = s.annos[path] ?? [];
+        const next = future[future.length - 1];
+        const currentStatus = s.images.find((item) => item.path === path)?.status ?? img.status;
+        const cur: HistorySnapshot = {
+          annotations: s.annos[path] ?? [],
+          status: currentStatus,
+        };
+        const validIds = new Set(next.annotations.map((annotation) => annotation.id));
+        const selectedIds = s.selectedIds.filter((id) => validIds.has(id));
         return {
-          annos: { ...s.annos, [path]: nextArr },
+          annos: { ...s.annos, [path]: next.annotations },
           future: { ...s.future, [path]: future.slice(0, -1) },
           past: { ...s.past, [path]: (s.past[path] ?? []).concat([cur]) },
+          images: s.images.map((item) =>
+            item.path === path ? { ...item, status: next.status } : item,
+          ),
           dirty: true,
           dirtyPaths: { ...s.dirtyPaths, [path]: true },
+          selectedIds,
+          selectedId: selectedIds[selectedIds.length - 1] ?? null,
         };
       });
     },
@@ -1462,10 +1595,6 @@ export const useStore = create<AppState>((set, get) => {
       saveLS(LS.formulaModel, key);
       set({ formulaModel: key });
     },
-    setTableModel: (key) => {
-      saveLS(LS.tableModel, key);
-      set({ tableModel: key });
-    },
     setDevice: (device) => {
       const next = normalizeDevice(device);
       saveLS(LS.device, next);
@@ -1490,23 +1619,25 @@ export const useStore = create<AppState>((set, get) => {
       saveLS(LS.inferenceTuning, next);
       set({ inferenceTuning: next });
     },
+    setAutoSave: (enabled) => {
+      saveLS(LS.autoSave, enabled);
+      set({ autoSave: enabled });
+    },
 
     preannotateCurrent: async () => {
       const img = get().currentImage();
       if (!img || get().busy) return;
-      const existing = get().currentAnnos().length;
-      if (existing > 0 && !(await confirmReplaceAnnotations(get().locale, existing))) return;
       const locale = get().locale;
-      set({ busy: true, statusMsg: t(locale, "message.preannotatingCurrent") });
+      set({ busy: true });
       try {
+        const existing = get().currentAnnos().length;
+        if (existing > 0 && !(await confirmReplaceAnnotations(locale, existing))) return;
+        set({ statusMsg: t(locale, "message.preannotatingCurrent") });
         const { annos, skipped } = await runPreannotation(img.path);
         applyPreannotation(img.path, annos);
         const base = tt(locale, "message.preannotateCurrentComplete", { count: annos.length });
         set({
-          statusMsg:
-            skipped > 0
-              ? `${base}, ${tt(locale, "message.regionsSkipped", { skipped })}`
-              : base,
+          statusMsg: appendSkipped(locale, base, skipped),
         });
       } catch (e) {
         set({ statusMsg: `${t(locale, "message.preannotateFailed")}: ${String(e)}` });
@@ -1518,6 +1649,15 @@ export const useStore = create<AppState>((set, get) => {
     preannotateAll: async () => {
       const images = get().images;
       if (!images.length || get().busy) return;
+      const locale = get().locale;
+      set({
+        busy: true,
+        batchRunning: true,
+        batchTotal: images.length,
+        batchDone: 0,
+        batchCancelRequested: false,
+        statusMsg: t(locale, "message.inspectingAnnotations"),
+      });
 
       // Pre-check existing annotations sequentially (not Promise.all, which
       // fired one IPC call per image and could swamp the bridge on large
@@ -1525,31 +1665,80 @@ export const useStore = create<AppState>((set, get) => {
       let annotatedImageCount = 0;
       let annotationCount = 0;
       try {
-        for (const img of images) {
-          const count = (await annotationsForPath(img.path)).length;
+        for (let index = 0; index < images.length; index += 1) {
+          if (get().batchCancelRequested) {
+            set({
+              busy: false,
+              batchRunning: false,
+              batchCancelRequested: false,
+              statusMsg: tt(locale, "message.batchPreannotateCancelled", {
+                completed: 0,
+                total: images.length,
+              }),
+            });
+            return;
+          }
+          const img = images[index];
+          set({
+            batchDone: index,
+            statusMsg: tt(locale, "message.inspectingAnnotationsProgress", {
+              current: index + 1,
+              total: images.length,
+              name: img.name,
+            }),
+          });
+          const count = await annotationCountForPath(img.path);
           if (count > 0) {
             annotatedImageCount += 1;
             annotationCount += count;
           }
         }
       } catch (e) {
-        set({ statusMsg: `${t(get().locale, "message.inspectAnnotationsFailed")}: ${String(e)}` });
+        set({
+          busy: false,
+          batchRunning: false,
+          batchCancelRequested: false,
+          statusMsg: `${t(get().locale, "message.inspectAnnotationsFailed")}: ${String(e)}`,
+        });
         return;
       }
 
-      if (
-        annotationCount > 0 &&
-        !(await confirmReplaceBatchAnnotations(
-          get().locale,
-          images.length,
-          annotatedImageCount,
-          annotationCount,
-        ))
-      ) {
+      if (get().batchCancelRequested) {
+        set({
+          busy: false,
+          batchRunning: false,
+          batchCancelRequested: false,
+          statusMsg: tt(locale, "message.batchPreannotateCancelled", {
+            completed: 0,
+            total: images.length,
+          }),
+        });
         return;
       }
 
-      const locale = get().locale;
+      if (annotationCount > 0) {
+        try {
+          const replace = await confirmReplaceBatchAnnotations(
+            get().locale,
+            images.length,
+            annotatedImageCount,
+            annotationCount,
+          );
+          if (!replace) {
+            set({ busy: false, batchRunning: false, batchCancelRequested: false });
+            return;
+          }
+        } catch (error) {
+          set({
+            busy: false,
+            batchRunning: false,
+            batchCancelRequested: false,
+            statusMsg: `${t(get().locale, "message.preannotateFailed")}: ${String(error)}`,
+          });
+          return;
+        }
+      }
+
       // Snapshot model/mode/device once so the whole batch uses one
       // consistent config; a mid-run switch won't mix results.
       const params = snapshotPreannParams();
@@ -1558,7 +1747,6 @@ export const useStore = create<AppState>((set, get) => {
         batchRunning: true,
         batchTotal: images.length,
         batchDone: 0,
-        batchCancelRequested: false,
         statusMsg: tt(locale, "message.batchPreannotatingStart", { total: images.length }),
       });
       let completed = 0;
@@ -1575,14 +1763,19 @@ export const useStore = create<AppState>((set, get) => {
           const img = images[i];
           set({
             batchDone: i,
-            statusMsg: tt(locale, "message.preannotatingProgress", { current: i + 1, total: images.length, name: img.name }),
+            statusMsg: tt(locale, "message.preannotatingProgressSaving", { current: i + 1, total: images.length, name: img.name }),
           });
           try {
             const { annos, skipped } = await runPreannotation(img.path, params);
             applyPreannotation(img.path, annos);
+            await saveImageAfterBatchPreannotation(img.path);
             skippedTotal += skipped;
             completed += 1;
           } catch (e) {
+            if (get().batchCancelRequested) {
+              cancelled = true;
+              break;
+            }
             failures.push(`${img.name}: ${String(e)}`);
           }
         }
@@ -1591,11 +1784,11 @@ export const useStore = create<AppState>((set, get) => {
           : failures.length
             ? tt(locale, "message.batchPreannotateFinished", { completed, total: images.length, failed: failures.length })
             : tt(locale, "message.batchPreannotateComplete", { completed, total: images.length });
+        if (failures.length) {
+          console.error(`Batch pre-annotation failures:\n${failures.join("\n")}`);
+        }
         set({
-          statusMsg:
-            skippedTotal > 0
-              ? `${base}, ${tt(locale, "message.regionsSkipped", { skipped: skippedTotal })}`
-              : base,
+          statusMsg: appendSkipped(locale, base, skippedTotal),
         });
       } finally {
         set({ busy: false, batchRunning: false, batchCancelRequested: false });
@@ -1603,85 +1796,69 @@ export const useStore = create<AppState>((set, get) => {
     },
 
     requestBatchCancel: () => {
-      if (get().batchRunning) set({ batchCancelRequested: true });
-    },
-    save: async () => {
-      const paths = Object.keys(get().dirtyPaths);
-      const img = get().currentImage();
-      if (!paths.length && img) paths.push(img.path);
-      if (!paths.length) return true;
-      const locale = get().locale;
-      set({ busy: true, statusMsg: t(locale, "message.saving") });
-      try {
-        // Determine the final status for each saved path up front and write it
-        // to disk in the same pass, so disk and memory agree afterwards. Only
-        // paths that were actually saved are touched; previously every loaded
-        // image with annotations got marked "done" even if it was only viewed.
-        const annos = get().annos;
-        const saved = new Set(paths);
-        const finalStatus: Record<string, ImageStatus> = {};
-        for (const path of paths) {
-          const list = annos[path];
-          finalStatus[path] =
-            list != null && list.length > 0 ? "done" : "pending";
-          await saveImageFile(path, finalStatus[path]);
-        }
-        set((s) => ({
-          dirty: false,
-          dirtyPaths: {},
-          images: s.images.map((it) =>
-            saved.has(it.path) ? { ...it, status: finalStatus[it.path] } : it,
-          ),
-          statusMsg: t(locale, "common.saved"),
-        }));
-        return true;
-      } catch (e) {
-        set({ statusMsg: `${t(locale, "message.saveFailed")}: ${String(e)}` });
-        return false;
-      } finally {
-        set({ busy: false });
+      if (get().batchRunning) {
+        set({ batchCancelRequested: true });
+        void api.cancelPreannotation().catch(() => undefined);
       }
     },
+    save: async () => {
+      return saveCurrentImage();
+    },
     saveAndNext: async () => {
-      const ok = await get().save();
+      const ok = await saveCurrentImage("done");
       // Only advance when the save actually succeeded; on failure stay put so
       // the user sees the error instead of silently moving on unsaved.
-      if (ok) get().next();
+      if (ok) void get().selectIndex(get().currentIndex + 1);
     },
 
     exportableImages: async () => {
-      const payload: {
-        path: string;
-        boxes: { points: Point[]; transcription: string }[];
-      }[] = [];
-      for (const img of get().images) {
-        const file = await annotationFileForExport(img.path);
-        // Export text-carrying annotations only: leaf text/formula/table lines
-        // recognized within a region. Pure layout region parents are
-        // structural and have no transcription, so they're skipped, matching
-        // PPOCRLabel's detection/recognition dataset purpose.
-        const boxes = file.annotations
-          .filter(
-            (a) =>
-              a.points.length >= 3 &&
-              a.results.some((r) => r.task === "text_recognition"),
-          )
-          .map((a) => ({
-            points: a.points.map((p) => [p[0], p[1]] as Point),
-            transcription: resultText(a),
-          }));
-        if (boxes.length) payload.push({ path: img.path, boxes });
+      if (get().exportRunning) return null;
+      const images = [...get().images];
+      set({
+        exportRunning: true,
+        exportTotal: images.length,
+        exportDone: 0,
+        exportCancelRequested: false,
+      });
+      try {
+        const collected = await mapLimited(
+          images,
+          LOAD_IPC_CONCURRENCY,
+          async (img) => {
+            const file = await annotationFileForExport(img.path);
+            const boxes = file.annotations
+              .filter(
+                (a) =>
+                  a.points.length >= 3 &&
+                  a.results.some((r) => r.task === "text_recognition"),
+              )
+              .map((a) => ({
+                points: a.points.map((p) => [p[0], p[1]] as Point),
+                transcription: resultText(a),
+              }));
+            set((s) => ({ exportDone: Math.min(s.exportTotal, s.exportDone + 1) }));
+            return boxes.length ? { path: img.path, boxes } : null;
+          },
+          () => !get().exportCancelRequested,
+        );
+        if (get().exportCancelRequested) return null;
+        return collected.filter((item) => item !== null);
+      } finally {
+        set({ exportRunning: false });
       }
-      return payload;
+    },
+    requestExportCancel: () => {
+      if (get().exportRunning) set({ exportCancelRequested: true });
     },
 
     refreshModels: async () => {
       try {
-        const [models, modelOptions] = await Promise.all([
+        const [models, modelOptions, deviceOptions] = await Promise.all([
           api.modelStatus(),
           api.modelOptions(),
+          api.availableDevices(),
         ]);
-        const next: Partial<AppState> = { models, modelOptions };
+        const next: Partial<AppState> = { models, modelOptions, deviceOptions };
         const state = get();
         if (!modelOptions.ocr_profiles.some((o) => o.key === state.ocrModel) && modelOptions.ocr_profiles[0]) {
           next.ocrModel = modelOptions.ocr_profiles[0].key;
@@ -1695,9 +1872,9 @@ export const useStore = create<AppState>((set, get) => {
           next.formulaModel = modelOptions.formula_profiles[0].key;
           saveLS(LS.formulaModel, next.formulaModel);
         }
-        if (!modelOptions.table_profiles.some((o) => o.key === state.tableModel) && modelOptions.table_profiles[0]) {
-          next.tableModel = modelOptions.table_profiles[0].key;
-          saveLS(LS.tableModel, next.tableModel);
+        if (!deviceOptions.some((o) => o.key === state.device) && deviceOptions[0]) {
+          next.device = deviceOptions[0].key;
+          saveLS(LS.device, next.device);
         }
         set(next);
       } catch (e) {

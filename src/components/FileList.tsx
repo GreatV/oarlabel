@@ -91,15 +91,19 @@ export function FileList({ collapsed, onToggle, width }: FileListProps) {
                     <div
                       role="button"
                       tabIndex={0}
+                      aria-disabled={s.busy}
                       className={cn(
                         "mb-1 flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                         active ? "border border-primary/30 bg-primary/10" : "border border-transparent hover:bg-secondary",
+                        s.busy && "cursor-not-allowed opacity-60",
                       )}
-                      onClick={() => s.selectIndex(i)}
+                      onClick={() => {
+                        if (!s.busy) void s.selectIndex(i);
+                      }}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
+                        if (!s.busy && (e.key === "Enter" || e.key === " ")) {
                           e.preventDefault();
-                          s.selectIndex(i);
+                          void s.selectIndex(i);
                         }
                       }}
                     >
@@ -110,7 +114,7 @@ export function FileList({ collapsed, onToggle, width }: FileListProps) {
                     </div>
                   </ContextMenuTrigger>
                   <ContextMenuContent>
-                    <ContextMenuItem onClick={() => s.selectIndex(i)}>
+                    <ContextMenuItem disabled={s.busy} onClick={() => void s.selectIndex(i)}>
                       {t(l, "toolbar.open")}
                     </ContextMenuItem>
                   </ContextMenuContent>

@@ -1,4 +1,4 @@
-import { useEffect, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { CanvasStage } from "@/components/CanvasStage";
 import { FileList } from "@/components/FileList";
 import { MenuBar } from "@/components/MenuBar";
@@ -15,7 +15,7 @@ import { t } from "@/i18n";
 import { useShortcuts } from "@/hooks/useShortcuts";
 import { useNativeMenu } from "@/hooks/useNativeMenu";
 import { useTheme } from "@/hooks/useTheme";
-import { confirmDiscardChanges, pickDirectory, win } from "@/lib/tauri";
+import { api, confirmDiscardChanges, win } from "@/lib/tauri";
 import { isMac } from "@/lib/platform";
 import { useStore } from "@/store";
 
@@ -37,6 +37,7 @@ function App() {
   const [exportOpen, setExportOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const closeConfirmationRef = useRef<Promise<boolean> | null>(null);
 
   const openFolder = useStore((s) => s.openFolder);
   const refreshModels = useStore((s) => s.refreshModels);
@@ -47,7 +48,7 @@ function App() {
 
   const handleOpen = async () => {
     try {
-      const dir = await pickDirectory(t(locale, "picker.imageFolder"));
+      const dir = await api.pickImageDirectory(t(locale, "picker.imageFolder"));
       if (dir) void openFolder(dir);
     } catch (e) {
       useStore.setState({ statusMsg: `${t(locale, "message.openFolderFailed")}: ${String(e)}` });
@@ -102,16 +103,34 @@ function App() {
   }, [refreshModels]);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    win.onCloseRequested(async (event) => {
+    document.documentElement.lang = locale;
+  }, [locale]);
+
+  useEffect(() => {
+    const unlistenPromise = win.onCloseRequested(async (event) => {
       const state = useStore.getState();
-      if (state.dirty && !(await confirmDiscardChanges(state.locale))) {
-        event.preventDefault();
+      if (!state.dirty) return;
+
+      // Reuse an in-flight confirmation if multiple close requests arrive
+      // together (for example from a rapid double-click or a native shortcut).
+      const confirmation =
+        closeConfirmationRef.current ?? confirmDiscardChanges(state.locale);
+      closeConfirmationRef.current = confirmation;
+      try {
+        if (!(await confirmation)) event.preventDefault();
+      } finally {
+        if (closeConfirmationRef.current === confirmation) {
+          closeConfirmationRef.current = null;
+        }
       }
-    }).then((fn) => {
-      unlisten = fn;
     });
-    return () => unlisten?.();
+
+    // Registration is asynchronous. React StrictMode mounts, cleans up, and
+    // mounts effects again in development; waiting for the registration before
+    // unsubscribing prevents the first listener from leaking into the second.
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
   }, []);
 
   return (

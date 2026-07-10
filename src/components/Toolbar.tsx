@@ -198,13 +198,13 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
           <TooltipContent side={side}>{t(l, "toolbar.drag")}</TooltipContent>
         </Tooltip>
         <Tip label={t(l, "toolbar.open")} side={side}>
-          <Button variant="ghost" className={cn("px-2", vertical && "w-full")} onClick={onOpen}>
+          <Button variant="ghost" className={cn("px-2", vertical && "w-full")} onClick={onOpen} disabled={s.busy}>
             <FolderOpen className="h-4 w-4" />
             <span className={labelCls}>{t(l, "toolbar.open")}</span>
           </Button>
         </Tip>
         <Tip label={t(l, "toolbar.save")} side={side}>
-          <Button variant="ghost" className={cn("px-2", vertical && "w-full")} onClick={() => s.save()} disabled={!hasImage}>
+          <Button variant="ghost" className={cn("px-2", vertical && "w-full")} onClick={() => s.save()} disabled={!hasImage || s.busy}>
             <Save className="h-4 w-4" />
             <span className={labelCls}>{t(l, "toolbar.save")}</span>
           </Button>
@@ -218,14 +218,14 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
         <ToggleGroup
           type="single"
           orientation={vertical ? "vertical" : "horizontal"}
-          value={s.modes[0]}
+          value={s.mode}
           onValueChange={(next) => {
-            if (next) s.toggleMode(next as Mode);
+            if (next) s.setMode(next as Mode);
           }}
           className={cn(vertical && "w-full flex-col")}
         >
           {MODES.map((m) => {
-            const active = s.modes.includes(m.key);
+            const active = s.mode === m.key;
             return (
               <Tip key={m.key} label={modeLabel(l, m.key)} side={side}>
                 <ToggleGroupItem
@@ -249,7 +249,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
 
         <Separator orientation={vertical ? "horizontal" : "vertical"} className={cn(vertical ? "my-1" : "mx-2 h-7")} />
         <Tip label={t(l, "toolbar.export")} side={side}>
-          <Button variant="ghost" className={cn("px-2", vertical && "w-full")} onClick={onExport} disabled={!s.images.length}>
+          <Button variant="ghost" className={cn("px-2", vertical && "w-full")} onClick={onExport} disabled={!s.images.length || s.busy}>
             <Upload className="h-4 w-4" />
             <span className={labelCls}>{t(l, "toolbar.export")}</span>
           </Button>
@@ -262,7 +262,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
         <ScrollArea className="min-h-0 flex-1">
           <div className="flex flex-col items-stretch gap-1 px-3 py-1.5">
             <Tip label={t(l, "toolbar.previous")} side={side}>
-              <Button variant="ghost" className="w-full px-2" onClick={() => s.prev()} disabled={s.currentIndex <= 0}>
+              <Button variant="ghost" className="w-full px-2" onClick={() => s.prev()} disabled={s.busy || s.currentIndex <= 0}>
                 <ArrowLeft className="h-4 w-4" />
                 {t(l, "toolbar.previous")}
               </Button>
@@ -272,7 +272,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
                 variant="ghost"
                 className="w-full px-2"
                 onClick={() => s.next()}
-                disabled={s.currentIndex < 0 || s.currentIndex >= s.images.length - 1}
+                disabled={s.busy || s.currentIndex < 0 || s.currentIndex >= s.images.length - 1}
               >
                 <ArrowRight className="h-4 w-4" />
                 {t(l, "toolbar.next")}
@@ -313,7 +313,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
       ) : (
         <div className="flex items-center gap-1 px-3 py-1.5">
           <Tip label={t(l, "toolbar.previous")} side={side}>
-            <Button variant="ghost" onClick={() => s.prev()} disabled={s.currentIndex <= 0}>
+            <Button variant="ghost" onClick={() => s.prev()} disabled={s.busy || s.currentIndex <= 0}>
               <ArrowLeft className="h-4 w-4" />
               <span className={labelCls}>{t(l, "toolbar.previous")}</span>
             </Button>
@@ -322,7 +322,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
             <Button
               variant="ghost"
               onClick={() => s.next()}
-              disabled={s.currentIndex < 0 || s.currentIndex >= s.images.length - 1}
+              disabled={s.busy || s.currentIndex < 0 || s.currentIndex >= s.images.length - 1}
             >
               <ArrowRight className="h-4 w-4" />
               <span className={labelCls}>{t(l, "toolbar.next")}</span>
