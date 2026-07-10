@@ -10,9 +10,9 @@ import { useEffect } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import { t, type MessageKey } from "@/i18n";
 import { isMac } from "@/lib/platform";
-import { pickDirectory, pickImages, pickPdf } from "@/lib/tauri";
+import { api, pickImages, pickPdf } from "@/lib/tauri";
 import { useStore } from "@/store";
-import { VIEW_KEYS, type Device, type ModelOption, type Theme, type ViewOptions } from "@/types";
+import { DEFAULT_DEVICE_OPTIONS, VIEW_KEYS, type Device, type ModelOption, type Theme, type ViewOptions } from "@/types";
 
 /** Dialogs the native menu can open. Provided by App.tsx. */
 export interface NativeMenuOpeners {
@@ -31,7 +31,11 @@ interface NativeMenuPayload {
   layoutModel: string;
   formulaModel: string;
   device: string;
+  autoSave: boolean;
+  recentDirs: string[];
 }
+
+const NATIVE_RECENT_LIMIT = 8;
 
 export function useNativeMenu(openers: NativeMenuOpeners): void {
   useEffect(() => {
@@ -50,10 +54,59 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
     let lastLayoutModel = useStore.getState().layoutModel;
     let lastFormulaModel = useStore.getState().formulaModel;
     let lastDevice = useStore.getState().device;
+    let lastAutoSave = useStore.getState().autoSave;
+    let lastRecentDirs = [...useStore.getState().recentDirs];
+    let lastEnabled: Record<string, boolean> = {};
+
+    const enabledState = (): Record<string, boolean> => {
+      const state = useStore.getState();
+      const image = state.currentImage();
+      const path = image?.path;
+      const hasImage = !!image;
+      const hasImages = state.images.length > 0;
+      const hasSelection = state.selectedIds.length > 0;
+      const idle = !state.busy;
+      const enabled: Record<string, boolean> = {
+        "oar:open-folder": idle,
+        "oar:import-images": idle,
+        "oar:import-pdf": idle,
+        "oar:save": hasImage && idle,
+        "oar:save-and-next": hasImage && idle,
+        "oar:export": hasImages && idle,
+        "oar:undo": !!path && (state.past[path]?.length ?? 0) > 0 && idle,
+        "oar:redo": !!path && (state.future[path]?.length ?? 0) > 0 && idle,
+        "oar:copy": hasSelection,
+        "oar:paste": hasImage && state.clipboard.length > 0 && idle,
+        "oar:select-all": hasImage,
+        "oar:clear-sel": hasSelection,
+        "oar:delete": hasSelection && idle,
+        "oar:zoom-in": hasImage,
+        "oar:zoom-out": hasImage,
+        "oar:actual": hasImage,
+        "oar:fit-window": hasImage,
+        "oar:fit-width": hasImage,
+        "oar:preannotate-current": hasImage && idle,
+        "oar:preannotate-all": hasImages && idle,
+      };
+      for (let index = 0; index < NATIVE_RECENT_LIMIT; index += 1) {
+        enabled[`oar:recent:${index}`] = index < state.recentDirs.length && idle;
+      }
+      return enabled;
+    };
+
+    const syncEnabled = (force = false) => {
+      const next = enabledState();
+      for (const [id, enabled] of Object.entries(next)) {
+        if (force || lastEnabled[id] !== enabled) {
+          void emit("oar:set-menu-enabled", `${id}|${enabled}`);
+        }
+      }
+      lastEnabled = next;
+    };
 
     // Build the structured rebuild payload Rust parses into (locale, ViewState).
-    // Send it as an object, not a JSON string, so Rust receives the same shape
-    // it deserializes. Older string payloads remain supported on the Rust side.
+    // Send it as an object, not a JSON string, so Rust receives the exact shape
+    // it deserializes.
     const rebuildPayload = (): NativeMenuPayload => {
       const {
         locale,
@@ -63,6 +116,8 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
         layoutModel,
         formulaModel,
         device,
+        autoSave,
+        recentDirs,
       } = useStore.getState();
       return {
         locale,
@@ -72,6 +127,8 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
         layoutModel,
         formulaModel,
         device,
+        autoSave,
+        recentDirs,
       };
     };
     const rebuildNow = (event: string) => {
@@ -83,7 +140,10 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
       lastLayoutModel = state.layoutModel;
       lastFormulaModel = state.formulaModel;
       lastDevice = state.device;
-      void emit(event, rebuildPayload());
+      lastAutoSave = state.autoSave;
+      lastRecentDirs = [...state.recentDirs];
+      lastEnabled = {};
+      void emit(event, rebuildPayload()).then(() => syncEnabled(true));
     };
 
     // Initial build in the real locale, with the real view state seeded in.
@@ -98,7 +158,9 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
         layoutModel,
         formulaModel,
         device,
+        autoSave,
         modelOptions,
+        recentDirs,
       } = useStore.getState();
       // Live per-key sync for toggleView / resetLayout. Emit each changed key
       // (a full reset flips all 7) so the native items track React state
@@ -118,9 +180,16 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
       }
       if (device !== lastDevice) {
         lastDevice = device;
-        for (const key of ["auto", "cpu", "cuda"]) {
-          void emit("oar:set-menu-state", `oar:device:${key}|${device === key}`);
+        const deviceOptions = useStore.getState().deviceOptions.length
+          ? useStore.getState().deviceOptions
+          : DEFAULT_DEVICE_OPTIONS;
+        for (const option of deviceOptions) {
+          void emit("oar:set-menu-state", `oar:device:${option.key}|${device === option.key}`);
         }
+      }
+      if (autoSave !== lastAutoSave) {
+        lastAutoSave = autoSave;
+        void emit("oar:set-menu-state", `oar:auto-save|${autoSave}`);
       }
       const syncModelGroup = (
         kind: "ocr" | "layout" | "formula",
@@ -149,7 +218,13 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
       if (locale !== lastLocale) {
         // Locale change: full rebuild, seeding view/theme state into the new menu.
         rebuildNow("oar:set-locale");
+      } else if (
+        recentDirs.length !== lastRecentDirs.length ||
+        recentDirs.some((dir, index) => dir !== lastRecentDirs[index])
+      ) {
+        rebuildNow("oar:rebuild-menu");
       }
+      syncEnabled();
     };
     const unsubStore = useStore.subscribe(sync);
 
@@ -163,7 +238,9 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
     };
     const pickFolder = async () => {
       try {
-        const dir = await pickDirectory(t(useStore.getState().locale, "picker.imageFolder"));
+        const dir = await api.pickImageDirectory(
+          t(useStore.getState().locale, "picker.imageFolder"),
+        );
         if (dir) void useStore.getState().openFolder(dir);
       } catch (e) {
         fail(e, "message.loadFailed");
@@ -249,6 +326,17 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
         useStore.getState().setTheme(id.slice("oar:theme:".length) as Theme);
         return;
       }
+      if (id === "oar:auto-save") {
+        const s = useStore.getState();
+        s.setAutoSave(!s.autoSave);
+        return;
+      }
+      if (id.startsWith("oar:recent:")) {
+        const index = Number(id.slice("oar:recent:".length));
+        const dir = useStore.getState().recentDirs[index];
+        if (dir) void useStore.getState().openFolder(dir);
+        return;
+      }
       if (id.startsWith("oar:model:")) {
         applyModel(id.slice("oar:model:".length));
       }
@@ -260,8 +348,12 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
     const ids = new Set<string>(Object.keys(routes));
     for (const k of VIEW_KEYS) ids.add(`oar:view:${k}`);
     for (const l of ["zh-CN", "en-US"]) ids.add(`oar:lang:${l}`);
-    for (const d of ["auto", "cpu", "cuda"]) ids.add(`oar:device:${d}`);
+    for (const d of ["cpu", "cuda"]) ids.add(`oar:device:${d}`);
     for (const theme of ["light", "dark", "system"]) ids.add(`oar:theme:${theme}`);
+    ids.add("oar:auto-save");
+    for (let index = 0; index < NATIVE_RECENT_LIMIT; index += 1) {
+      ids.add(`oar:recent:${index}`);
+    }
 
     const unsubs: Array<() => void> = [];
     const install = (id: string) => {

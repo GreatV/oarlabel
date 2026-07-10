@@ -3,11 +3,6 @@ import zhCN from "@/locales/zh-CN.json";
 
 export type Locale = "zh-CN" | "en-US";
 
-export const LOCALE_OPTIONS: { key: Locale; label: string }[] = [
-  { key: "zh-CN", label: zhCN["locale.zh-CN"] },
-  { key: "en-US", label: zhCN["locale.en-US"] },
-];
-
 const messages = {
   "zh-CN": zhCN,
   "en-US": enUS,
@@ -15,8 +10,13 @@ const messages = {
 
 export type MessageKey = keyof typeof zhCN;
 
+export const LOCALE_OPTIONS: { key: Locale; labelKey: MessageKey }[] = [
+  { key: "zh-CN", labelKey: "locale.zh-CN" },
+  { key: "en-US", labelKey: "locale.en-US" },
+];
+
 export function t(locale: Locale, key: MessageKey): string {
-  return messages[locale][key] ?? messages["zh-CN"][key];
+  return messages[locale][key];
 }
 
 export function tt(

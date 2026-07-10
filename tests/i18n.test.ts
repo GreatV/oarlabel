@@ -3,7 +3,14 @@ import { LOCALE_OPTIONS, t, tt } from "@/i18n";
 
 describe("i18n", () => {
   it("keeps locale option labels readable", () => {
-    expect(LOCALE_OPTIONS.map((option) => option.label)).toEqual(["简体中文", "English"]);
+    expect(LOCALE_OPTIONS.map((option) => t("en-US", option.labelKey))).toEqual([
+      "Simplified Chinese",
+      "English",
+    ]);
+    expect(LOCALE_OPTIONS.map((option) => t("zh-CN", option.labelKey))).toEqual([
+      "简体中文",
+      "English",
+    ]);
   });
 
   it("formats parameterized messages", () => {
@@ -14,5 +21,10 @@ describe("i18n", () => {
   it("contains localized confirmation copy", () => {
     expect(t("en-US", "confirm.discardChanges.title")).toBe("Unsaved changes");
     expect(t("zh-CN", "confirm.replaceAnnotations.title")).toBe("替换标注");
+  });
+
+  it("distinguishes current-image saves from other unsaved images", () => {
+    expect(t("en-US", "message.currentImageSaved")).toBe("Current image saved");
+    expect(t("zh-CN", "statusbar.otherImagesUnsaved")).toBe("其他图片未保存");
   });
 });

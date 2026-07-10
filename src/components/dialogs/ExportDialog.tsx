@@ -1,5 +1,6 @@
 import { FolderOpen, Loader2 } from "lucide-react";
 import { useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -10,7 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { t, tt, type MessageKey } from "@/i18n";
-import { api, pickDirectory } from "@/lib/tauri";
+import { api } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useStore } from "@/store";
 
@@ -35,24 +36,50 @@ const KINDS: { key: Kind; titleKey: MessageKey; descKey: MessageKey }[] = [
 ];
 
 export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
-  const locale = useStore((s) => s.locale);
+  const {
+    locale,
+    exportRunning,
+    exportTotal,
+    exportDone,
+    exportCancelRequested,
+    requestExportCancel,
+  } = useStore(
+    useShallow((s) => ({
+      locale: s.locale,
+      exportRunning: s.exportRunning,
+      exportTotal: s.exportTotal,
+      exportDone: s.exportDone,
+      exportCancelRequested: s.exportCancelRequested,
+      requestExportCancel: s.requestExportCancel,
+    })),
+  );
   const [kind, setKind] = useState<Kind>("detection");
   const [outDir, setOutDir] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const pick = async () => {
-    const d = await pickDirectory(t(locale, "export.pickDir"));
-    if (d) setOutDir(d);
+    try {
+      const d = await api.pickExportDirectory(t(locale, "export.pickDir"));
+      if (d) setOutDir(d);
+    } catch (error) {
+      useStore.setState({ statusMsg: `${t(locale, "export.failed")}: ${String(error)}` });
+    }
   };
 
   const run = async () => {
-    if (!outDir) return;
+    if (!outDir || useStore.getState().busy) return;
     setBusy(true);
+    useStore.setState({ busy: true, statusMsg: t(locale, "message.exporting") });
     try {
       // Reading annotations across all images can throw (corrupt/missing
       // JSON); keep it inside the try so the error surfaces instead of
       // becoming an unhandled rejection with no UI feedback.
       const payload = await useStore.getState().exportableImages();
+
+      if (payload === null) {
+        useStore.setState({ statusMsg: t(locale, "message.exportCancelled") });
+        return;
+      }
 
       if (payload.length === 0) {
         useStore.setState({ statusMsg: t(locale, "export.noAnnotations") });
@@ -66,11 +93,17 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
       useStore.setState({ statusMsg: `${t(locale, "export.failed")}: ${String(e)}` });
     } finally {
       setBusy(false);
+      useStore.setState({ busy: false });
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!busy || next) onOpenChange(next);
+      }}
+    >
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{t(locale, "export.title")}</DialogTitle>
@@ -107,8 +140,24 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
           </span>
         </div>
 
+        {exportRunning && (
+          <div className="text-xs text-muted-foreground">
+            {tt(locale, "export.collectingProgress", {
+              current: exportDone,
+              total: exportTotal,
+            })}
+          </div>
+        )}
+
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
+          <Button
+            variant="ghost"
+            onClick={() => {
+              if (exportRunning) requestExportCancel();
+              else onOpenChange(false);
+            }}
+            disabled={busy && (!exportRunning || exportCancelRequested)}
+          >
             {t(locale, "common.cancel")}
           </Button>
           <Button onClick={run} disabled={!outDir || busy}>

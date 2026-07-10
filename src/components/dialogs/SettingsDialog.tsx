@@ -1,5 +1,5 @@
 import { FolderOpen } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -33,20 +33,33 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     textRecognitionModelPath: "",
     textRecognitionDictPath: "",
   });
+  const [customPathsLoading, setCustomPathsLoading] = useState(false);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     if (!open) return;
+    let cancelled = false;
+    setCustomPathsLoading(true);
     api
       .readCustomOcrPaths()
-      .then(setCustomPaths)
+      .then((paths) => {
+        if (!cancelled) setCustomPaths(paths);
+      })
       .catch((e) => {
+        if (cancelled) return;
         useStore.setState({
-          statusMsg: `${t(locale, "settings.readCustomModelFailed")}: ${String(e)}`,
+          statusMsg: `${t(useStore.getState().locale, "settings.readCustomModelFailed")}: ${String(e)}`,
         });
+      })
+      .finally(() => {
+        if (!cancelled) setCustomPathsLoading(false);
       });
-  }, [open, locale]);
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
-  const saveCustomPaths = async (paths: CustomOcrPaths) => {
+  const persistCustomPaths = async (paths: CustomOcrPaths) => {
     try {
       await api.saveCustomOcrPaths(paths);
       await refreshModels();
@@ -66,6 +79,14 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     }
   };
 
+  const saveCustomPaths = (paths: CustomOcrPaths): Promise<void> => {
+    const queued = saveQueueRef.current
+      .catch(() => undefined)
+      .then(() => persistCustomPaths(paths));
+    saveQueueRef.current = queued.catch(() => undefined);
+    return queued;
+  };
+
   const updateCustomPath = (key: keyof CustomOcrPaths, value: string) => {
     setCustomPaths((paths) => ({ ...paths, [key]: value }));
   };
@@ -75,11 +96,17 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     title: string,
     extensions?: string[],
   ) => {
-    const path = await pickFile(title, extensions);
-    if (!path) return;
-    const next = { ...customPaths, [key]: path };
-    setCustomPaths(next);
-    await saveCustomPaths(next);
+    try {
+      const path = await pickFile(title, extensions);
+      if (!path) return;
+      const next = { ...customPaths, [key]: path };
+      setCustomPaths(next);
+      await saveCustomPaths(next);
+    } catch (error) {
+      useStore.setState({
+        statusMsg: `${t(locale, "settings.customModelSaveFailed")}: ${String(error)}`,
+      });
+    }
   };
 
   const updateTextDetectionTuning = (key: string, value: number) => {
@@ -96,9 +123,16 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     });
   };
 
+  const updateLayoutTuning = (key: string, value: number) => {
+    setInferenceTuning({
+      ...inferenceTuning,
+      layout: { ...inferenceTuning.layout, [key]: value },
+    });
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{t(locale, "settings.title")}</DialogTitle>
         </DialogHeader>
@@ -161,6 +195,37 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
               />
             </div>
           </div>
+          <div className="mb-3 border-b pb-3">
+            <div className="mb-3 text-sm font-medium">
+              {t(locale, "settings.layoutParamsTitle")}
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <ThresholdNumber
+                label={t(locale, "settings.layoutScoreThreshold")}
+                value={inferenceTuning.layout.score_threshold ?? 0}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(value) => updateLayoutTuning("score_threshold", value)}
+              />
+              <ThresholdNumber
+                label={t(locale, "settings.layoutNmsThreshold")}
+                value={inferenceTuning.layout.nms_threshold ?? 0}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(value) => updateLayoutTuning("nms_threshold", value)}
+              />
+              <ThresholdNumber
+                label={t(locale, "settings.layoutMaxElements")}
+                value={inferenceTuning.layout.max_elements ?? 100}
+                min={1}
+                max={1000}
+                step={1}
+                onChange={(value) => updateLayoutTuning("max_elements", value)}
+              />
+            </div>
+          </div>
           <div className="mb-2">
             <div>
               <div className="text-sm font-medium">{t(locale, "settings.customTitle")}</div>
@@ -170,6 +235,9 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
             </div>
           </div>
           <div className="grid gap-3">
+            {customPathsLoading && (
+              <div className="text-xs text-muted-foreground">{t(locale, "settings.loading")}</div>
+            )}
             <PathInput
               label={t(locale, "settings.customTextDetectionModel")}
               value={customPaths.textDetectionModelPath}
@@ -183,6 +251,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                 )
               }
               browseLabel={t(locale, "settings.chooseFile")}
+              disabled={customPathsLoading}
             />
             <PathInput
               label={t(locale, "settings.customTextRecognitionModel")}
@@ -197,6 +266,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                 )
               }
               browseLabel={t(locale, "settings.chooseFile")}
+              disabled={customPathsLoading}
             />
             <PathInput
               label={t(locale, "settings.customTextRecognitionDict")}
@@ -211,6 +281,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                 )
               }
               browseLabel={t(locale, "settings.chooseFile")}
+              disabled={customPathsLoading}
             />
           </div>
         </div>
@@ -226,6 +297,7 @@ function PathInput({
   onChange,
   onCommit,
   onBrowse,
+  disabled,
 }: {
   label: string;
   value: string;
@@ -233,6 +305,7 @@ function PathInput({
   onChange: (value: string) => void;
   onCommit: () => void;
   onBrowse: () => void;
+  disabled?: boolean;
 }) {
   return (
     <label className="grid gap-1 text-xs font-medium">
@@ -241,6 +314,7 @@ function PathInput({
         <Input
           className="min-w-0 flex-1 font-mono text-xs"
           value={value}
+          disabled={disabled}
           onChange={(e) => onChange(e.target.value)}
           onBlur={onCommit}
         />
@@ -250,6 +324,8 @@ function PathInput({
           variant="secondary"
           aria-label={browseLabel}
           title={browseLabel}
+          disabled={disabled}
+          onMouseDown={(event) => event.preventDefault()}
           onClick={onBrowse}
         >
           <FolderOpen className="h-4 w-4" />

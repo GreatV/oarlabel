@@ -38,23 +38,23 @@ const EN_JSON: &str = include_str!("../../src/locales/en-US.json");
 /// Cached parsed locale tables. `tr()` is called ~45× per menu rebuild, and
 /// re-parsing the whole locale JSON each time is wasteful; parse once.
 #[cfg(target_os = "macos")]
-fn locale_table(locale: &str) -> &'static HashMap<&'static str, String> {
+fn locale_table(locale: &str) -> Option<&'static HashMap<&'static str, String>> {
     static ZH: OnceLock<HashMap<&'static str, String>> = OnceLock::new();
     static EN: OnceLock<HashMap<&'static str, String>> = OnceLock::new();
     match locale {
-        "en-US" => EN.get_or_init(|| serde_json::from_str(EN_JSON).unwrap_or_default()),
-        _ => ZH.get_or_init(|| serde_json::from_str(ZH_JSON).unwrap_or_default()),
+        "zh-CN" => Some(ZH.get_or_init(|| serde_json::from_str(ZH_JSON).unwrap_or_default())),
+        "en-US" => Some(EN.get_or_init(|| serde_json::from_str(EN_JSON).unwrap_or_default())),
+        _ => None,
     }
 }
 
-/// Look up a localized menu label. Falls back to the key (and then English) so
-/// a missing translation never produces an empty string in the menu.
+/// Look up a localized menu label. Missing labels return the key itself so
+/// translation defects stay visible instead of silently switching language.
 #[cfg(target_os = "macos")]
 fn tr(locale: &str, key: &str) -> String {
     locale_table(locale)
-        .get(key)
+        .and_then(|table| table.get(key))
         .cloned()
-        .or_else(|| locale_table("en-US").get(key).cloned())
         .unwrap_or_else(|| key.to_string())
 }
 
@@ -77,6 +77,10 @@ pub struct ViewState {
     pub formula_model: Option<String>,
     #[serde(default)]
     pub device: Option<String>,
+    #[serde(default)]
+    pub auto_save: bool,
+    #[serde(default)]
+    pub recent_dirs: Vec<String>,
 }
 
 impl ViewState {
@@ -107,7 +111,7 @@ impl ViewState {
 
     #[cfg(target_os = "macos")]
     fn device_checked(&self, device: &str) -> bool {
-        self.device.as_deref().unwrap_or("auto") == device
+        self.device.as_deref().unwrap_or("cpu") == device
     }
 }
 
@@ -138,6 +142,48 @@ fn build(app: &AppHandle, locale: &str, state: &ViewState) -> tauri::Result<Menu
         version: Some(pkg.version.to_string()),
         ..Default::default()
     };
+    let about_label = tr(locale, "menu.app.about");
+    let services_label = tr(locale, "menu.app.services");
+    let hide_label = tr(locale, "menu.app.hide");
+    let hide_others_label = tr(locale, "menu.app.hideOthers");
+    let quit_label = tr(locale, "menu.app.quit");
+    let close_window_label = tr(locale, "menu.file.closeWindow");
+    let fullscreen_label = tr(locale, "menu.view.fullscreen");
+
+    let recent_items: Vec<MenuItem<Wry>> = if state.recent_dirs.is_empty() {
+        vec![MenuItem::with_id(
+            app,
+            "oar:no-recent",
+            tr(locale, "menu.file.noRecent"),
+            false,
+            None::<&str>,
+        )?]
+    } else {
+        state
+            .recent_dirs
+            .iter()
+            .enumerate()
+            .map(|(index, dir)| {
+                let label = std::path::Path::new(dir)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(dir);
+                MenuItem::with_id(
+                    app,
+                    format!("oar:recent:{index}"),
+                    label,
+                    true,
+                    None::<&str>,
+                )
+            })
+            .collect::<tauri::Result<Vec<_>>>()?
+    };
+    let recent_refs: Vec<&dyn IsMenuItem<Wry>> = recent_items
+        .iter()
+        .map(|item| item as &dyn IsMenuItem<Wry>)
+        .collect();
+    let recent_menu = Submenu::with_items(app, tr(locale, "menu.file.recent"), true, &recent_refs)?;
 
     // The macOS App menu (bold app name) — must be first.
     let app_menu = Submenu::with_items(
@@ -145,14 +191,14 @@ fn build(app: &AppHandle, locale: &str, state: &ViewState) -> tauri::Result<Menu
         &pkg.name,
         true,
         &[
-            &PredefinedMenuItem::about(app, None, Some(about_md))?,
+            &PredefinedMenuItem::about(app, Some(&about_label), Some(about_md))?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::services(app, None)?,
+            &PredefinedMenuItem::services(app, Some(&services_label))?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::hide(app, None)?,
-            &PredefinedMenuItem::hide_others(app, None)?,
+            &PredefinedMenuItem::hide(app, Some(&hide_label))?,
+            &PredefinedMenuItem::hide_others(app, Some(&hide_others_label))?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::quit(app, None)?,
+            &PredefinedMenuItem::quit(app, Some(&quit_label))?,
         ],
     )?;
 
@@ -182,6 +228,7 @@ fn build(app: &AppHandle, locale: &str, state: &ViewState) -> tauri::Result<Menu
                 true,
                 None::<&str>,
             )?,
+            &recent_menu,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(
                 app,
@@ -197,6 +244,14 @@ fn build(app: &AppHandle, locale: &str, state: &ViewState) -> tauri::Result<Menu
                 true,
                 None::<&str>,
             )?,
+            &CheckMenuItem::with_id(
+                app,
+                "oar:auto-save",
+                tr(locale, "menu.file.autoSave"),
+                true,
+                state.auto_save,
+                None::<&str>,
+            )?,
             &MenuItem::with_id(
                 app,
                 "oar:export",
@@ -205,7 +260,7 @@ fn build(app: &AppHandle, locale: &str, state: &ViewState) -> tauri::Result<Menu
                 None::<&str>,
             )?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::close_window(app, None)?,
+            &PredefinedMenuItem::close_window(app, Some(&close_window_label))?,
         ],
     )?;
 
@@ -424,7 +479,7 @@ fn build(app: &AppHandle, locale: &str, state: &ViewState) -> tauri::Result<Menu
                 None::<&str>,
             )?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::fullscreen(app, None)?,
+            &PredefinedMenuItem::fullscreen(app, Some(&fullscreen_label))?,
         ],
     )?;
 
@@ -545,41 +600,26 @@ fn build_model_menu(app: &AppHandle, locale: &str, state: &ViewState) -> Option<
         &opts.formula_profiles,
         state,
     )?;
-    let device = Submenu::with_items(
-        app,
-        tr(locale, "menu.model.device"),
-        true,
-        &[
-            &CheckMenuItem::with_id(
+    let device_items: Vec<CheckMenuItem<Wry>> = crate::devices::available_devices()
+        .into_iter()
+        .filter_map(|d| {
+            CheckMenuItem::with_id(
                 app,
-                "oar:device:auto",
-                "Auto",
+                format!("oar:device:{}", d.key),
+                d.label,
                 true,
-                state.device_checked("auto"),
+                state.device_checked(d.key),
                 None::<&str>,
             )
-            .ok()?,
-            &CheckMenuItem::with_id(
-                app,
-                "oar:device:cpu",
-                "CPU",
-                true,
-                state.device_checked("cpu"),
-                None::<&str>,
-            )
-            .ok()?,
-            &CheckMenuItem::with_id(
-                app,
-                "oar:device:cuda",
-                "CUDA",
-                true,
-                state.device_checked("cuda"),
-                None::<&str>,
-            )
-            .ok()?,
-        ],
-    )
-    .ok()?;
+            .ok()
+        })
+        .collect();
+    let device_refs: Vec<&dyn IsMenuItem<Wry>> = device_items
+        .iter()
+        .map(|i| i as &dyn IsMenuItem<Wry>)
+        .collect();
+    let device =
+        Submenu::with_items(app, tr(locale, "menu.model.device"), true, &device_refs).ok()?;
 
     Submenu::with_items(
         app,
@@ -657,10 +697,34 @@ pub fn set_checked(app: &AppHandle, item_id: &str, checked: bool) {
 }
 
 #[cfg(target_os = "macos")]
+pub fn set_enabled(app: &AppHandle, item_id: &str, enabled: bool) {
+    let Some(top) = app.menu() else { return };
+    if let Some(item) = find_menu_item(top.items().unwrap_or_default(), item_id) {
+        let _ = item.set_enabled(enabled);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn find_menu_item(items: Vec<MenuItemKind<Wry>>, item_id: &str) -> Option<MenuItem<Wry>> {
+    for item in items {
+        match item {
+            MenuItemKind::MenuItem(item) if item.id() == item_id => return Some(item),
+            MenuItemKind::Submenu(submenu) => {
+                if let Some(found) = find_menu_item(submenu.items().unwrap_or_default(), item_id) {
+                    return Some(found);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
 fn find_check_item(items: Vec<MenuItemKind<Wry>>, item_id: &str) -> Option<CheckMenuItem<Wry>> {
     for item in items {
         match item {
-            MenuItemKind::Check(check) if check.id() == &item_id => return Some(check),
+            MenuItemKind::Check(check) if check.id() == item_id => return Some(check),
             MenuItemKind::Submenu(submenu) => {
                 if let Some(found) = find_check_item(submenu.items().unwrap_or_default(), item_id) {
                     return Some(found);
