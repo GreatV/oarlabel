@@ -40,6 +40,8 @@ export default defineConfig(async () => ({
     rollupOptions: {
       output: {
         manualChunks: {
+          vendor: ["react", "react-dom", "zustand", "lucide-react"],
+          math: ["katex"],
           canvas: ["konva", "react-konva"],
           radix: [
             "@radix-ui/react-checkbox",
