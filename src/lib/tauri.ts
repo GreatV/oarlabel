@@ -2,11 +2,12 @@
 
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { confirm, open } from "@tauri-apps/plugin-dialog";
+import { ask, confirm, open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { t, tt, type Locale } from "@/i18n";
 import type {
   CustomOcrPaths,
+  DeviceOption,
   ImageItem,
   InferenceTuning,
   ModelOptions,
@@ -19,11 +20,6 @@ import type {
 
 export function fileSrc(path: string): string {
   return convertFileSrc(path);
-}
-
-export async function pickDirectory(title: string): Promise<string | null> {
-  const res = await open({ directory: true, multiple: false, title });
-  return typeof res === "string" ? res : null;
 }
 
 export async function pickFile(title: string, extensions?: string[]): Promise<string | null> {
@@ -65,6 +61,18 @@ export function confirmReplaceBatchAnnotations(
   );
 }
 
+export function askSaveAndCompleteCurrent(locale: Locale): Promise<boolean> {
+  return ask(
+    t(locale, "confirm.saveAndCompleteCurrent.message"),
+    {
+      title: t(locale, "confirm.saveAndCompleteCurrent.title"),
+      kind: "warning",
+      okLabel: t(locale, "confirm.saveAndCompleteCurrent.save"),
+      cancelLabel: t(locale, "confirm.saveAndCompleteCurrent.skip"),
+    },
+  );
+}
+
 const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "bmp", "webp", "gif", "tif", "tiff"];
 
 /** Pick one or more image files. Returns their absolute paths. */
@@ -94,17 +102,20 @@ export function openExternal(url: string): Promise<void> {
 }
 
 export const api = {
+  pickImageDirectory: (title: string) =>
+    invoke<string | null>("pick_image_directory", { title }),
   listImages: (dir: string) =>
     invoke<Omit<ImageItem, "status">[]>("list_images", { dir }),
   imageItems: (paths: string[]) =>
     invoke<Omit<ImageItem, "status">[]>("image_items", { paths }),
-  importPdf: (pdfPath: string, outDir?: string) =>
-    invoke<Omit<ImageItem, "status">[]>("import_pdf", { pdfPath, outDir: outDir ?? null }),
+  importPdf: (pdfPath: string) =>
+    invoke<Omit<ImageItem, "status">[]>("import_pdf", { pdfPath }),
   imageSize: (path: string) => invoke<[number, number]>("image_size", { path }),
   readAnnotation: (imagePath: string) =>
     invoke<string | null>("read_annotation", { imagePath }),
   saveAnnotation: (imagePath: string, data: string) =>
     invoke<void>("save_annotation", { imagePath, data }),
+  availableDevices: () => invoke<DeviceOption[]>("available_devices"),
   modelStatus: () => invoke<ModelStatus[]>("model_status"),
   modelOptions: () => invoke<ModelOptions>("model_options"),
   readCustomOcrPaths: () => invoke<CustomOcrPaths>("read_custom_ocr_paths"),
@@ -112,28 +123,25 @@ export const api = {
     invoke<void>("save_custom_ocr_paths", { paths }),
   preannotate: (
     imagePath: string,
-    mode: Mode | "structure",
+    mode: Mode,
     ocrModel: string,
     layoutModel: string,
     formulaModel: string,
-    tableModel: string,
     device: string,
-    modes?: Mode[],
     thresholds?: InferenceTuning | null,
   ) =>
     invoke<PreannResult>("preannotate", {
       imagePath,
       params: {
         mode,
-        modes: modes ?? [],
         ocrModel,
         layoutModel,
         formulaModel,
-        tableModel,
         device,
         thresholds: thresholds ?? null,
       },
     }),
+  cancelPreannotation: () => invoke<void>("cancel_preannotation"),
   recognizeTextRegions: (
     imagePath: string,
     ocrModel: string,
@@ -164,6 +172,8 @@ export const api = {
         regions,
       },
     }),
+  pickExportDirectory: (title: string) =>
+    invoke<string | null>("pick_export_directory", { title }),
   exportDataset: (
     images: { path: string; boxes: { points: number[][]; transcription: string }[] }[],
     outDir: string,

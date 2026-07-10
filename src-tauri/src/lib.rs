@@ -1,6 +1,9 @@
 //! oarlabel Tauri command surface.
 
+mod access;
+mod devices;
 mod export;
+mod geometry;
 mod menu;
 mod models;
 mod ocr;
@@ -9,7 +12,8 @@ mod project;
 
 use serde::Deserialize;
 use tauri::menu::MenuEvent;
-use tauri::{AppHandle, Emitter, Listener, Manager};
+use tauri::{AppHandle, Emitter, Listener, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tracing_subscriber::EnvFilter;
 
@@ -20,14 +24,9 @@ use tracing_subscriber::EnvFilter;
 #[serde(rename_all = "camelCase")]
 struct PreannParams {
     mode: String,
-    /// Active annotation modes for the structured pipeline. Only consulted
-    /// when `mode == "structure"`; ignored by the single-mode runs.
-    #[serde(default)]
-    modes: Vec<String>,
     ocr_model: String,
     layout_model: String,
     formula_model: String,
-    table_model: String,
     device: String,
     #[serde(default)]
     thresholds: Option<models::InferenceTuning>,
@@ -68,22 +67,26 @@ struct MenuPayload {
     formula_model: Option<String>,
     #[serde(default)]
     device: Option<String>,
+    #[serde(default)]
+    auto_save: bool,
+    #[serde(default)]
+    recent_dirs: Vec<String>,
 }
 
-/// Parse a menu-rebuild event payload into (locale, ViewState). Accepts the
-/// structured `{"locale","view"}` shape; if parsing fails (e.g. a legacy bare
-/// locale string), fall back to the payload-as-locale with default (all-true)
-/// view state so a rebuild never breaks.
-fn parse_menu_payload(raw: &str) -> (String, menu::ViewState) {
-    if let Ok(p) = serde_json::from_str::<MenuPayload>(raw) {
-        return menu_payload_to_state(p);
-    }
-    ("zh-CN".into(), menu::ViewState::default())
+/// Parse a menu-rebuild event payload into (locale, ViewState). The backend is
+/// deliberately strict here: invalid payloads must not silently rebuild the
+/// native menu in another language.
+fn parse_menu_payload(raw: &str) -> Result<(String, menu::ViewState), String> {
+    let p = serde_json::from_str::<MenuPayload>(raw)
+        .map_err(|e| format!("invalid native menu payload: {e}"))?;
+    menu_payload_to_state(p)
 }
 
-fn menu_payload_to_state(p: MenuPayload) -> (String, menu::ViewState) {
-    (
-        p.locale,
+fn menu_payload_to_state(p: MenuPayload) -> Result<(String, menu::ViewState), String> {
+    let locale = normalize_locale(&p.locale)
+        .ok_or_else(|| format!("invalid native menu locale: {}", p.locale))?;
+    Ok((
+        locale,
         menu::ViewState {
             view: p.view,
             theme: p.theme,
@@ -91,8 +94,52 @@ fn menu_payload_to_state(p: MenuPayload) -> (String, menu::ViewState) {
             layout_model: p.layout_model,
             formula_model: p.formula_model,
             device: p.device,
+            auto_save: p.auto_save,
+            recent_dirs: p.recent_dirs,
         },
-    )
+    ))
+}
+
+fn normalize_locale(locale: &str) -> Option<String> {
+    match locale.trim() {
+        "zh-CN" => Some("zh-CN".into()),
+        "en-US" => Some("en-US".into()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_menu_payload;
+
+    #[test]
+    fn parse_menu_payload_accepts_structured_payload() {
+        let (locale, state) = parse_menu_payload(
+            r#"{"locale":"en-US","view":{"fileList":false},"theme":"dark","ocrModel":"ppocrv6_tiny","layoutModel":"layout_doc_v3","formulaModel":"pp_formulanet_plus_s","device":"cpu","autoSave":true,"recentDirs":["/tmp/images"]}"#,
+        )
+        .expect("structured payload should parse");
+        assert_eq!(locale, "en-US");
+        assert_eq!(state.view.get("fileList"), Some(&false));
+        assert_eq!(state.theme.as_deref(), Some("dark"));
+        assert_eq!(state.device.as_deref(), Some("cpu"));
+        assert!(state.auto_save);
+        assert_eq!(state.recent_dirs, vec!["/tmp/images"]);
+    }
+
+    #[test]
+    fn parse_menu_payload_rejects_legacy_string_locale() {
+        assert!(parse_menu_payload("\"en-US\"").is_err());
+        assert!(parse_menu_payload("en-US").is_err());
+    }
+
+    #[test]
+    fn parse_menu_payload_rejects_unknown_locale() {
+        let err = match parse_menu_payload(r#"{"locale":"fr-FR","view":{}}"#) {
+            Ok(_) => panic!("unknown locale should be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.contains("invalid native menu locale"));
+    }
 }
 
 fn init_logging() {
@@ -113,72 +160,93 @@ fn init_logging() {
 }
 
 #[tauri::command]
-fn list_images(app: AppHandle, dir: String) -> Result<Vec<project::ImageItem>, String> {
-    // Validate first, authorize only on success. list_images checks is_dir and
-    // returns a sorted image list; we only ever widen the asset scope for a
-    // folder that actually exists and that the user explicitly opened, never
-    // for an arbitrary string.
+fn list_images(
+    app: AppHandle,
+    access: State<'_, access::PathAccess>,
+    dir: String,
+) -> Result<Vec<project::ImageItem>, String> {
     let items = project::list_images(&dir)?;
-    app.asset_protocol_scope()
-        .allow_directory(&dir, true)
-        .map_err(|e| format!("Failed to authorize directory access: {e}"))?;
-    Ok(items)
+    activate_image_workspace(&app, &access, items)
 }
 
 #[tauri::command]
-fn image_items(app: AppHandle, paths: Vec<String>) -> Vec<project::ImageItem> {
-    // Validate first (is_file + is_image, inside project::image_items), then
-    // authorize only the confirmed image files — never the raw input strings,
-    // which could be arbitrary paths a compromised frontend passes in.
+fn image_items(
+    app: AppHandle,
+    access: State<'_, access::PathAccess>,
+    paths: Vec<String>,
+) -> Result<Vec<project::ImageItem>, String> {
     let items = project::image_items(&paths);
+    activate_image_workspace(&app, &access, items)
+}
+
+fn activate_image_workspace(
+    app: &AppHandle,
+    access: &access::PathAccess,
+    mut items: Vec<project::ImageItem>,
+) -> Result<Vec<project::ImageItem>, String> {
+    let paths = items
+        .iter()
+        .map(|item| item.path.clone())
+        .collect::<Vec<_>>();
+    let canonical = access.replace_images(&paths)?;
     let scope = app.asset_protocol_scope();
-    for it in &items {
-        let _ = scope.allow_file(&it.path);
+    for (item, path) in items.iter_mut().zip(canonical) {
+        scope
+            .allow_file(&path)
+            .map_err(|e| format!("Failed to authorize image access: {e}"))?;
+        item.path = path.to_string_lossy().into_owned();
     }
-    items
+    Ok(items)
 }
 
 #[tauri::command]
 async fn import_pdf(
     app: AppHandle,
+    access: State<'_, access::PathAccess>,
     pdf_path: String,
-    out_dir: Option<String>,
 ) -> Result<Vec<project::ImageItem>, String> {
     let default_root = app
         .path()
         .app_cache_dir()
         .map_err(|e| e.to_string())?
         .join("pdf-pages");
-    // Render first (this also validates pdf_path and creates the page dir),
-    // then authorize only the concrete page directory that now exists — never
-    // an unvalidated caller-supplied out_dir.
-    let items = tauri::async_runtime::spawn_blocking(move || {
-        pdf::import_pdf(&pdf_path, &default_root, out_dir.as_deref())
-    })
-    .await
-    .map_err(|e| format!("PDF import task failed: {e}"))??;
-
-    if let Some(first) = items.first() {
-        if let Some(parent) = std::path::Path::new(&first.path).parent() {
-            let _ = app.asset_protocol_scope().allow_directory(parent, true);
-        }
-    }
-    Ok(items)
+    // PDF pages always go to the application cache; the caller cannot select
+    // an arbitrary write location.
+    let items =
+        tauri::async_runtime::spawn_blocking(move || pdf::import_pdf(&pdf_path, &default_root))
+            .await
+            .map_err(|e| format!("PDF import task failed: {e}"))??;
+    activate_image_workspace(&app, &access, items)
 }
 
 #[tauri::command]
-fn image_size(path: String) -> Result<(u32, u32), String> {
-    project::image_size(&path)
+fn image_size(access: State<'_, access::PathAccess>, path: String) -> Result<(u32, u32), String> {
+    let path = access.require_image(&path)?;
+    project::image_size(&path.to_string_lossy())
 }
 
 #[tauri::command]
-fn read_annotation(image_path: String) -> Result<Option<String>, String> {
-    project::read_annotation(&image_path)
+fn read_annotation(
+    access: State<'_, access::PathAccess>,
+    image_path: String,
+) -> Result<Option<String>, String> {
+    let path = access.require_image(&image_path)?;
+    project::read_annotation(&path.to_string_lossy())
 }
 
 #[tauri::command]
-fn save_annotation(image_path: String, data: String) -> Result<(), String> {
-    project::save_annotation(&image_path, &data)
+fn save_annotation(
+    access: State<'_, access::PathAccess>,
+    image_path: String,
+    data: String,
+) -> Result<(), String> {
+    let path = access.require_image(&image_path)?;
+    project::save_annotation(&path.to_string_lossy(), &data)
+}
+
+#[tauri::command]
+fn available_devices() -> Vec<devices::DeviceOption> {
+    devices::available_devices()
 }
 
 #[tauri::command]
@@ -204,16 +272,19 @@ fn save_custom_ocr_paths(app: AppHandle, paths: models::CustomOcrPaths) -> Resul
 #[tauri::command]
 async fn preannotate(
     app: AppHandle,
+    access: State<'_, access::PathAccess>,
     image_path: String,
     params: PreannParams,
 ) -> Result<ocr::PreannResult, String> {
+    let image_path = access
+        .require_image(&image_path)?
+        .to_string_lossy()
+        .into_owned();
     let PreannParams {
         mode,
-        modes,
         ocr_model,
         layout_model,
         formula_model,
-        table_model,
         device,
         thresholds,
     } = params;
@@ -223,7 +294,6 @@ async fn preannotate(
     let log_ocr_model = ocr_model.clone();
     let log_layout_model = layout_model.clone();
     let log_formula_model = formula_model.clone();
-    let log_table_model = table_model.clone();
     let log_device = device.clone();
     tracing::info!(
         mode = %log_mode,
@@ -231,50 +301,29 @@ async fn preannotate(
         ocr_model = %log_ocr_model,
         layout_model = %log_layout_model,
         formula_model = %log_formula_model,
-        table_model = %log_table_model,
         device = %log_device,
         "preannotate started"
     );
 
-    let result = tauri::async_runtime::spawn_blocking(move || match mode.as_str() {
-        "ocr" => ocr::run_ocr(&app, &image_path, &ocr_model, &device, thresholds),
-        // reading-order mode: OCR plus a per-box position index (oar-ocr already
-        // returns regions in reading order; run_reading_order attaches the index).
-        "reading" => ocr::run_reading_order(&app, &image_path, &ocr_model, &device, thresholds),
-        "layout" => ocr::run_layout(&app, &image_path, None, &layout_model, &device, thresholds),
-        "table" => ocr::run_table(
-            &app,
-            &image_path,
-            &layout_model,
-            &table_model,
-            &device,
-            thresholds,
-        ),
-        "formula" => ocr::run_formula(
-            &app,
-            &image_path,
-            &layout_model,
-            &formula_model,
-            &device,
-            thresholds,
-        ),
-        // Structured pipeline: layout regions as parents, with recognition
-        // results (ocr/formula/table/reading) attached as children. Which
-        // recognizers run is decided by the active `modes`.
-        "structure" => ocr::run_structure(
-            &app,
-            &image_path,
-            &modes,
-            ocr::StructureRunConfig {
-                layout_key: &layout_model,
-                ocr_key: &ocr_model,
-                formula_key: &formula_model,
-                table_key: &table_model,
-                device: &device,
-                tuning: thresholds,
-            },
-        ),
-        other => Err(format!("Unknown mode: {other}")),
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        ocr::begin_preannotation_run();
+        let result = match mode.as_str() {
+            "ocr" => ocr::run_ocr(&app, &image_path, &ocr_model, &device, thresholds),
+            "layout" => {
+                ocr::run_layout(&app, &image_path, None, &layout_model, &device, thresholds)
+            }
+            "formula" => ocr::run_formula(
+                &app,
+                &image_path,
+                &layout_model,
+                &formula_model,
+                &device,
+                thresholds,
+            ),
+            other => Err(format!("Unknown mode: {other}")),
+        };
+        ocr::finish_preannotation_run();
+        result
     })
     .await
     .map_err(|e| format!("Pre-annotation task failed: {e}"))?;
@@ -291,11 +340,21 @@ async fn preannotate(
 }
 
 #[tauri::command]
+fn cancel_preannotation() {
+    ocr::request_preannotation_cancel();
+}
+
+#[tauri::command]
 async fn recognize_text_regions(
     app: AppHandle,
+    access: State<'_, access::PathAccess>,
     image_path: String,
     params: TextRegionRecognitionParams,
 ) -> Result<ocr::TextRecognitionRegionResult, String> {
+    let image_path = access
+        .require_image(&image_path)?
+        .to_string_lossy()
+        .into_owned();
     let TextRegionRecognitionParams {
         ocr_model,
         device,
@@ -332,9 +391,14 @@ async fn recognize_text_regions(
 #[tauri::command]
 async fn recognize_formula_regions(
     app: AppHandle,
+    access: State<'_, access::PathAccess>,
     image_path: String,
     params: FormulaRegionRecognitionParams,
 ) -> Result<ocr::TextRecognitionRegionResult, String> {
+    let image_path = access
+        .require_image(&image_path)?
+        .to_string_lossy()
+        .into_owned();
     let FormulaRegionRecognitionParams {
         formula_model,
         device,
@@ -368,11 +432,60 @@ async fn recognize_formula_regions(
 }
 
 #[tauri::command]
+async fn pick_image_directory(app: AppHandle, title: String) -> Result<Option<String>, String> {
+    Ok(pick_directory(app, title)
+        .await?
+        .map(|path| path.to_string_lossy().into_owned()))
+}
+
+async fn pick_directory(
+    app: AppHandle,
+    title: String,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog().file().set_title(title).blocking_pick_folder()
+    })
+    .await
+    .map_err(|e| format!("Directory picker failed: {e}"))?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let selected = selected
+        .into_path()
+        .map_err(|e| format!("Invalid selected directory: {e}"))?;
+    Ok(Some(selected))
+}
+
+#[tauri::command]
+async fn pick_export_directory(
+    app: AppHandle,
+    access: State<'_, access::PathAccess>,
+    title: String,
+) -> Result<Option<String>, String> {
+    let Some(selected) = pick_directory(app, title).await? else {
+        return Ok(None);
+    };
+    let canonical = access.authorize_export_dir(&selected)?;
+    Ok(Some(canonical.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
 async fn export_dataset(
-    images: Vec<export::ExportImage>,
+    access: State<'_, access::PathAccess>,
+    mut images: Vec<export::ExportImage>,
     out_dir: String,
     kind: String,
 ) -> Result<String, String> {
+    let out_dir = access
+        .require_export_dir(&out_dir)?
+        .to_string_lossy()
+        .into_owned();
+    for image in &mut images {
+        image.path = access
+            .require_image(&image.path)?
+            .to_string_lossy()
+            .into_owned();
+    }
     tauri::async_runtime::spawn_blocking(move || match kind.as_str() {
         "detection" => export::export_detection(&images, &out_dir),
         "recognition" => export::export_recognition(&images, &out_dir),
@@ -387,9 +500,9 @@ pub fn run() {
     init_logging();
 
     tauri::Builder::default()
+        .manage(access::PathAccess::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         // Native menu items forward their id to the frontend as `oar:<id>`
         // events; predefined items (Cut/Copy/Paste/Quit/…) are OS-handled.
         .on_menu_event(|app, event: MenuEvent| {
@@ -427,16 +540,6 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            // The menu is built here (not in a `.menu()` builder closure)
-            // because building it needs `models::options(app)`, which reads
-            // the app-data dir via `app.path()` — and that state isn't
-            // available until setup. macOS only; off-macOS rebuild() is a
-            // no-op and the in-window MenuBar.tsx remains the UI. The default
-            // locale is zh-CN; the frontend re-triggers rebuild on its real
-            // initial locale right after mount.
-            #[cfg(target_os = "macos")]
-            menu::rebuild(app.handle(), "zh-CN", &menu::ViewState::default());
-
             // Rebuild the menu (locale change or model-option change). Payload
             // is JSON: {"locale":"zh-CN","view":{"fileList":true,...}}. The
             // view map seeds the View checkbox items with their real checked
@@ -444,19 +547,27 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             let handle = app.handle().clone();
             app.listen("oar:set-locale", move |event| {
-                let (locale, state) = parse_menu_payload(event.payload());
-                #[cfg(target_os = "macos")]
-                menu::rebuild(&handle, &locale, &state);
-                let _ = (&locale, &state); // silence unused off-macOS
+                match parse_menu_payload(event.payload()) {
+                    Ok((locale, state)) => {
+                        #[cfg(target_os = "macos")]
+                        menu::rebuild(&handle, &locale, &state);
+                        let _ = (&locale, &state); // silence unused off-macOS
+                    }
+                    Err(e) => tracing::error!(error = %e, "native menu rebuild skipped"),
+                }
             });
 
             #[cfg(target_os = "macos")]
             let handle = app.handle().clone();
             app.listen("oar:rebuild-menu", move |event| {
-                let (locale, state) = parse_menu_payload(event.payload());
-                #[cfg(target_os = "macos")]
-                menu::rebuild(&handle, &locale, &state);
-                let _ = (&locale, &state); // silence unused off-macOS
+                match parse_menu_payload(event.payload()) {
+                    Ok((locale, state)) => {
+                        #[cfg(target_os = "macos")]
+                        menu::rebuild(&handle, &locale, &state);
+                        let _ = (&locale, &state); // silence unused off-macOS
+                    }
+                    Err(e) => tracing::error!(error = %e, "native menu rebuild skipped"),
+                }
             });
 
             // The frontend tells us when a View checkbox should flip so the
@@ -477,6 +588,21 @@ pub fn run() {
                     }
                 }
             });
+
+            // Keep native menu availability aligned with the React UI. The
+            // frontend emits "item-id|true" whenever image/selection/history
+            // or busy state changes.
+            #[cfg(target_os = "macos")]
+            let handle = app.handle().clone();
+            app.listen("oar:set-menu-enabled", move |event| {
+                if let Ok(payload) = serde_json::from_str::<String>(event.payload()) {
+                    if let Some((item_id, value)) = payload.split_once('|') {
+                        #[cfg(target_os = "macos")]
+                        menu::set_enabled(&handle, item_id, value == "true");
+                        let _ = (item_id, value);
+                    }
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -486,13 +612,17 @@ pub fn run() {
             image_size,
             read_annotation,
             save_annotation,
+            available_devices,
             model_status,
             model_options,
             read_custom_ocr_paths,
             save_custom_ocr_paths,
             preannotate,
+            cancel_preannotation,
             recognize_text_regions,
             recognize_formula_regions,
+            pick_image_directory,
+            pick_export_directory,
             export_dataset,
         ])
         .run(tauri::generate_context!())

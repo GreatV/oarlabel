@@ -5,6 +5,10 @@ use serde::Serialize;
 use std::path::Path;
 use walkdir::WalkDir;
 
+const MAX_SCAN_DEPTH: usize = 16;
+const MAX_SCAN_ENTRIES: usize = 50_000;
+const MAX_SCAN_IMAGES: usize = 20_000;
+
 #[derive(Serialize)]
 pub struct ImageItem {
     pub path: String,
@@ -41,15 +45,45 @@ pub fn list_images(dir: &str) -> Result<Vec<ImageItem>, String> {
         ));
     }
 
+    list_images_with_limits(root, MAX_SCAN_DEPTH, MAX_SCAN_ENTRIES, MAX_SCAN_IMAGES)
+}
+
+fn list_images_with_limits(
+    root: &Path,
+    max_depth: usize,
+    max_entries: usize,
+    max_images: usize,
+) -> Result<Vec<ImageItem>, String> {
     let mut v = Vec::new();
-    for entry in WalkDir::new(root).follow_links(false).into_iter() {
+    let mut entries = 0usize;
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .max_depth(max_depth)
+        .into_iter()
+    {
         let entry = match entry {
             Ok(entry) => entry,
             Err(_) => continue,
         };
+        entries += 1;
+        if entries > max_entries {
+            return Err(format!(
+                "Directory scan stopped after {max_entries} entries. Please choose a smaller image folder."
+            ));
+        }
+        if entry.depth() == max_depth && entry.file_type().is_dir() {
+            return Err(format!(
+                "Directory scan exceeded the maximum depth of {max_depth}. Please choose a smaller image folder."
+            ));
+        }
         let path = entry.path();
         if path.is_file() && is_image(path) {
             v.push(image_item(path));
+            if v.len() > max_images {
+                return Err(format!(
+                    "Directory scan found more than {max_images} images. Please choose a smaller image folder."
+                ));
+            }
         }
     }
     v.sort_by(|a, b| a.path.cmp(&b.path));
@@ -232,5 +266,46 @@ mod tests {
         );
         assert!(!dir.join("scan.png.json.tmp").exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn directory_scan_rejects_image_count_over_limit() {
+        let dir = temp_workspace("scan-image-limit");
+        for name in ["one.png", "two.jpg", "three.webp"] {
+            std::fs::write(dir.join(name), b"image placeholder").unwrap();
+        }
+
+        let err = list_images_with_limits(&dir, 8, 100, 2)
+            .err()
+            .expect("scan should exceed image limit");
+        assert!(err.contains("more than 2 images"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn directory_scan_rejects_entry_count_over_limit() {
+        let dir = temp_workspace("scan-entry-limit");
+        for name in ["one.txt", "two.txt", "three.txt"] {
+            std::fs::write(dir.join(name), b"not an image").unwrap();
+        }
+
+        // The root itself is also a WalkDir entry.
+        let err = list_images_with_limits(&dir, 8, 3, 100)
+            .err()
+            .expect("scan should exceed entry limit");
+        assert!(err.contains("after 3 entries"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn directory_scan_rejects_excessive_depth() {
+        let dir = temp_workspace("scan-depth-limit");
+        std::fs::create_dir_all(dir.join("level-one/level-two")).unwrap();
+
+        let err = list_images_with_limits(&dir, 1, 100, 100)
+            .err()
+            .expect("scan should exceed depth limit");
+        assert!(err.contains("maximum depth of 1"));
+        std::fs::remove_dir_all(dir).ok();
     }
 }
