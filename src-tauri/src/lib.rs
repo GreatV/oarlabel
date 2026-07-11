@@ -73,6 +73,7 @@ struct MenuPayload {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct MenuItemStatePayload {
     id: String,
     value: bool,
