@@ -101,7 +101,15 @@ function targetDock(x: number, y: number, width: number, height: number): Toolba
 export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) {
   const s = useStore();
   const l = s.locale;
-  const hasImage = !!s.currentImage();
+  const currentImage = s.currentImage();
+  const hasImage = !!currentImage;
+  const currentLocked = s.busy || (!!currentImage && s.batchPendingPaths[currentImage.path] === true);
+  const batchConflict = s.busy || s.batchRunning;
+  const previousLocked = s.currentIndex <= 0
+    || s.batchPendingPaths[s.images[s.currentIndex - 1]?.path] === true;
+  const nextLocked = s.currentIndex < 0
+    || s.currentIndex >= s.images.length - 1
+    || s.batchPendingPaths[s.images[s.currentIndex + 1]?.path] === true;
   const vertical = dock === "left" || dock === "right";
   // Horizontal toolbar: hide button captions below `xl` (≈1280px) so the bar
   // collapses to icon-only instead of wrapping/overflowing when the window is
@@ -198,13 +206,13 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
           <TooltipContent side={side}>{t(l, "toolbar.drag")}</TooltipContent>
         </Tooltip>
         <Tip label={t(l, "toolbar.open")} side={side}>
-          <Button variant="ghost" className={cn("px-2", vertical && "w-full")} onClick={onOpen} disabled={s.busy}>
+          <Button variant="ghost" className={cn("px-2", vertical && "w-full")} onClick={onOpen} disabled={batchConflict}>
             <FolderOpen className="h-4 w-4" />
             <span className={labelCls}>{t(l, "toolbar.open")}</span>
           </Button>
         </Tip>
         <Tip label={t(l, "toolbar.save")} side={side}>
-          <Button variant="ghost" className={cn("px-2", vertical && "w-full")} onClick={() => s.save()} disabled={!hasImage || s.busy}>
+          <Button variant="ghost" className={cn("px-2", vertical && "w-full")} onClick={() => s.save()} disabled={!hasImage || currentLocked}>
             <Save className="h-4 w-4" />
             <span className={labelCls}>{t(l, "toolbar.save")}</span>
           </Button>
@@ -249,7 +257,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
 
         <Separator orientation={vertical ? "horizontal" : "vertical"} className={cn(vertical ? "my-1" : "mx-2 h-7")} />
         <Tip label={t(l, "toolbar.export")} side={side}>
-          <Button variant="ghost" className={cn("px-2", vertical && "w-full")} onClick={onExport} disabled={!s.images.length || s.busy}>
+          <Button variant="ghost" className={cn("px-2", vertical && "w-full")} onClick={onExport} disabled={!s.images.length || batchConflict}>
             <Upload className="h-4 w-4" />
             <span className={labelCls}>{t(l, "toolbar.export")}</span>
           </Button>
@@ -262,7 +270,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
         <ScrollArea className="min-h-0 flex-1">
           <div className="flex flex-col items-stretch gap-1 px-3 py-1.5">
             <Tip label={t(l, "toolbar.previous")} side={side}>
-              <Button variant="ghost" className="w-full px-2" onClick={() => s.prev()} disabled={s.busy || s.currentIndex <= 0}>
+              <Button variant="ghost" className="w-full px-2" onClick={() => s.prev()} disabled={s.busy || previousLocked}>
                 <ArrowLeft className="h-4 w-4" />
                 {t(l, "toolbar.previous")}
               </Button>
@@ -272,7 +280,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
                 variant="ghost"
                 className="w-full px-2"
                 onClick={() => s.next()}
-                disabled={s.busy || s.currentIndex < 0 || s.currentIndex >= s.images.length - 1}
+                disabled={s.busy || nextLocked}
               >
                 <ArrowRight className="h-4 w-4" />
                 {t(l, "toolbar.next")}
@@ -290,7 +298,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
                 size="sm"
                 className="h-9 w-full gap-1.5"
                 onClick={() => s.preannotateAll()}
-                disabled={!s.images.length || s.busy}
+                disabled={!s.images.length || batchConflict}
               >
                 <Sparkles className="h-4 w-4" />
                 {t(l, "toolbar.preannotateAll")}
@@ -302,7 +310,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
                 size="sm"
                 className="h-9 w-full gap-1.5"
                 onClick={() => s.preannotateCurrent()}
-                disabled={!hasImage || s.busy}
+                disabled={!hasImage || batchConflict}
               >
                 <FileImage className="h-4 w-4" />
                 {t(l, "toolbar.preannotateCurrent")}
@@ -313,7 +321,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
       ) : (
         <div className="flex items-center gap-1 px-3 py-1.5">
           <Tip label={t(l, "toolbar.previous")} side={side}>
-            <Button variant="ghost" onClick={() => s.prev()} disabled={s.busy || s.currentIndex <= 0}>
+            <Button variant="ghost" onClick={() => s.prev()} disabled={s.busy || previousLocked}>
               <ArrowLeft className="h-4 w-4" />
               <span className={labelCls}>{t(l, "toolbar.previous")}</span>
             </Button>
@@ -322,7 +330,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
             <Button
               variant="ghost"
               onClick={() => s.next()}
-              disabled={s.busy || s.currentIndex < 0 || s.currentIndex >= s.images.length - 1}
+              disabled={s.busy || nextLocked}
             >
               <ArrowRight className="h-4 w-4" />
               <span className={labelCls}>{t(l, "toolbar.next")}</span>
@@ -340,7 +348,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
               size="sm"
               className="h-9 gap-1.5"
               onClick={() => s.preannotateAll()}
-              disabled={!s.images.length || s.busy}
+              disabled={!s.images.length || batchConflict}
             >
               <Sparkles className="h-4 w-4" />
               <span className={labelCls}>{t(l, "toolbar.preannotateAll")}</span>
@@ -352,7 +360,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
               size="sm"
               className="h-9 gap-1.5"
               onClick={() => s.preannotateCurrent()}
-              disabled={!hasImage || s.busy}
+              disabled={!hasImage || batchConflict}
             >
               <FileImage className="h-4 w-4" />
               <span className={labelCls}>{t(l, "toolbar.preannotateCurrent")}</span>
@@ -387,7 +395,9 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
 function ToolGroup({ vertical, side }: { vertical: boolean; side: "top" | "bottom" | "left" | "right" }) {
   const s = useStore();
   const l = s.locale;
-  const hasImage = !!s.currentImage();
+  const currentImage = s.currentImage();
+  const hasImage = !!currentImage;
+  const currentLocked = s.busy || (!!currentImage && s.batchPendingPaths[currentImage.path] === true);
   // Mirror the main toolbar: collapse captions to icon-only on narrow widths
   // for the horizontal layout; vertical always shows captions.
   const labelCls = vertical ? undefined : "hidden xl:inline";
@@ -399,7 +409,7 @@ function ToolGroup({ vertical, side }: { vertical: boolean; side: "top" | "botto
       onValueChange={(v) => {
         if (v) s.setTool(v as Tool);
       }}
-      disabled={!hasImage}
+      disabled={!hasImage || currentLocked}
       className={cn(vertical && "w-full flex-col")}
     >
       {TOOLS.map((tool) => {

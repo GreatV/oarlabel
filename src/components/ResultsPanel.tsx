@@ -1,8 +1,8 @@
-import { FileText, ScanText } from "lucide-react";
+import { ChevronLeft, ChevronRight, FileText, GripVertical, ScanText } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { InputHTMLAttributes } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -15,17 +15,15 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { t } from "@/i18n";
+import { layoutLabelOptions } from "@/lib/layoutLabels";
 import { colorFor } from "@/lib/palette";
+import type { PanelSide } from "@/lib/panelDock";
 import { cn } from "@/lib/utils";
 import { useStore } from "@/store";
 import { resultLabel, resultScore, resultText } from "@/types";
 import type { Annotation } from "@/types";
-
-/** Suggested region labels offered as autocomplete options. Free text is still
- *  accepted — these are hints, not a closed set — so detector-emitted or
- *  user-defined labels aren't rejected. */
-const LAYOUT_LABELS = ["region", "layout", "formula", "table", "figure", "text"];
 
 function originalText(a: Annotation): string | undefined {
   const value = a.results.find((r) => r.task === "text_recognition")?.value.originalText;
@@ -38,20 +36,67 @@ function originalLabel(a: Annotation): string | undefined {
 }
 
 interface ResultsPanelProps {
-  width: number;
+  collapsed: boolean;
+  onToggle: () => void;
+  side: PanelSide;
+  onDockDragStart: (event: ReactPointerEvent<HTMLButtonElement>) => void;
 }
 
-export function ResultsPanel({ width }: ResultsPanelProps) {
-  const { l, annos, busy, recognizeAllTextBoxes } = useStore(
-    useShallow((s) => ({
-      l: s.locale,
-      annos: s.currentAnnos(),
-      busy: s.busy,
-      recognizeAllTextBoxes: s.recognizeAllTextBoxes,
-    })),
+export function ResultsPanel({ collapsed, onToggle, side, onDockDragStart }: ResultsPanelProps) {
+  const { l, annos, busy, batchRunning, mode, recognizeAllTextBoxes } = useStore(
+    useShallow((s) => {
+      const path = s.currentImage()?.path;
+      return {
+        l: s.locale,
+        annos: s.currentAnnos(),
+        busy: s.busy || (!!path && s.batchPendingPaths[path] === true),
+        batchRunning: s.batchRunning,
+        mode: s.mode,
+        recognizeAllTextBoxes: s.recognizeAllTextBoxes,
+      };
+    }),
   );
+
+  if (collapsed) {
+    return (
+      <div className="flex h-20 w-full flex-col items-center bg-card py-2">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 cursor-grab text-muted-foreground active:cursor-grabbing"
+          aria-label={t(l, "layout.movePanel")}
+          onPointerDown={onDockDragStart}
+        >
+          <GripVertical className="h-4 w-4" />
+        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 text-muted-foreground"
+              onClick={onToggle}
+              aria-label={t(l, "results.expand")}
+            >
+              {side === "left" ? (
+                <ChevronRight className="h-4 w-4" />
+              ) : (
+                <ChevronLeft className="h-4 w-4" />
+              )}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side={side === "left" ? "right" : "left"}>
+            {t(l, "results.expand")}
+          </TooltipContent>
+        </Tooltip>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex h-full min-w-64 flex-col border-l bg-card" style={{ width }}>
+    <div className="flex h-full min-h-0 w-full flex-col bg-card">
       <div className="flex items-center justify-between px-3 py-2.5">
         <span className="text-sm font-semibold">{t(l, "results.title.generic")}</span>
         <div className="flex items-center gap-2">
@@ -60,7 +105,7 @@ export function ResultsPanel({ width }: ResultsPanelProps) {
             variant="ghost"
             size="sm"
             className="h-7 gap-1.5 px-2"
-            disabled={!annos.length || busy}
+            disabled={!annos.length || busy || batchRunning || mode === "layout"}
             onClick={() => recognizeAllTextBoxes()}
           >
             <ScanText className="h-3.5 w-3.5" />
@@ -69,15 +114,42 @@ export function ResultsPanel({ width }: ResultsPanelProps) {
           <span className="text-xs text-muted-foreground">
             {annos.length} {t(l, "results.items")}
           </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 cursor-grab text-muted-foreground active:cursor-grabbing"
+                aria-label={t(l, "layout.movePanel")}
+                onPointerDown={onDockDragStart}
+              >
+                <GripVertical className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{t(l, "layout.movePanel")}</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 text-muted-foreground"
+                onClick={onToggle}
+                aria-label={t(l, "results.collapse")}
+              >
+                {side === "left" ? (
+                  <ChevronLeft className="h-4 w-4" />
+                ) : (
+                  <ChevronRight className="h-4 w-4" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{t(l, "results.collapse")}</TooltipContent>
+          </Tooltip>
         </div>
       </div>
-      {/* Shared autocomplete source for the inline label editor in each row. */}
-      <datalist id="oarlabel-layout-labels">
-        {LAYOUT_LABELS.map((label) => (
-          <option key={label} value={label} />
-        ))}
-      </datalist>
-
       <ScrollArea className="min-h-0 flex-1">
         <div className="px-2 pb-3">
           {annos.length === 0 ? (
@@ -106,6 +178,8 @@ function ResultRow({
 }) {
   const {
     l,
+    mode,
+    batchRunning,
     selected,
     busy,
     clipboardCount,
@@ -122,30 +196,36 @@ function ResultRow({
     selectAll,
     clearSelection,
   } = useStore(
-    useShallow((s) => ({
-      l: s.locale,
-      selected: s.selectedIds.includes(anno.id),
-      busy: s.busy,
-      clipboardCount: s.clipboard.length,
-      selectionCount: s.selectedIds.length,
-      select: s.select,
-      setAnnotationHidden: s.setAnnotationHidden,
-      setText: s.setText,
-      setLabel: s.setLabel,
-      copySelection: s.copySelection,
-      paste: s.paste,
-      ensureTextResult: s.ensureTextResult,
-      recognizeSelectedText: s.recognizeSelectedText,
-      removeAnnotation: s.removeAnnotation,
-      selectAll: s.selectAll,
-      clearSelection: s.clearSelection,
-    })),
+    useShallow((s) => {
+      const path = s.currentImage()?.path;
+      return {
+        l: s.locale,
+        mode: s.mode,
+        batchRunning: s.batchRunning,
+        selected: s.selectedIds.includes(anno.id),
+        busy: s.busy || (!!path && s.batchPendingPaths[path] === true),
+        clipboardCount: s.clipboard.length,
+        selectionCount: s.selectedIds.length,
+        select: s.select,
+        setAnnotationHidden: s.setAnnotationHidden,
+        setText: s.setText,
+        setLabel: s.setLabel,
+        copySelection: s.copySelection,
+        paste: s.paste,
+        ensureTextResult: s.ensureTextResult,
+        recognizeSelectedText: s.recognizeSelectedText,
+        removeAnnotation: s.removeAnnotation,
+        selectAll: s.selectAll,
+        clearSelection: s.clearSelection,
+      };
+    }),
   );
   const color = colorFor(index);
   // Each annotation renders by its OWN data, not the global mode: a row that
   // carries recognized text (text/formula/table) shows an editable input;
   // a pure layout region shows its label + detection score.
   const hasText = anno.results.some((r) => r.task === "text_recognition");
+  const hasLayoutLabel = anno.results.some((r) => r.task === "layout_detection");
   const label = resultLabel(anno);
   const isFormula = label === "formula";
   const badge = index + 1;
@@ -182,6 +262,21 @@ function ResultRow({
           </span>
           {hasText ? (
             <div className="min-w-0 flex-1">
+              {hasLayoutLabel && (
+                <div className="mb-1 flex items-center gap-1.5">
+                  <LayoutLabelSelect
+                    value={label ?? "region"}
+                    disabled={busy}
+                    ariaLabel={t(l, "results.region")}
+                    onChange={(value) => setLabel(anno.id, value)}
+                  />
+                  {score != null && (
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      {(score * 100).toFixed(1)}%
+                    </span>
+                  )}
+                </div>
+              )}
               {isFormula && <FormulaPreview latex={resultText(anno)} />}
               <CommitTextarea
                 value={resultText(anno)}
@@ -194,12 +289,11 @@ function ResultRow({
             </div>
           ) : (
             <div className="flex flex-1 items-center gap-1.5 py-1 text-sm">
-              <CommitLabelInput
-                value={label ?? ""}
+              <LayoutLabelSelect
+                value={label ?? "region"}
                 disabled={busy}
-                placeholder={t(l, "results.region")}
-                aria-label={t(l, "results.region")}
-                onCommit={(value) => setLabel(anno.id, value)}
+                ariaLabel={t(l, "results.region")}
+                onChange={(value) => setLabel(anno.id, value)}
               />
               {score != null && (
                 <span className="text-xs text-muted-foreground">{(score * 100).toFixed(1)}%</span>
@@ -219,12 +313,15 @@ function ResultRow({
           <ContextMenuShortcut>Ctrl+V</ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuSeparator />
-        {!hasText && (
+        {!hasText && mode !== "layout" && (
           <ContextMenuItem disabled={busy} onClick={() => ensureTextResult(anno.id)}>
             {t(l, "results.addText")}
           </ContextMenuItem>
         )}
-        <ContextMenuItem onClick={() => recognizeSelectedText()} disabled={busy}>
+        <ContextMenuItem
+          onClick={() => recognizeSelectedText()}
+          disabled={busy || batchRunning || mode === "layout"}
+        >
           {t(l, "results.recognizeText")}
         </ContextMenuItem>
         <ContextMenuItem disabled={busy} onClick={() => removeAnnotation(anno.id)}>
@@ -326,56 +423,36 @@ function CommitTextarea({
   );
 }
 
-function CommitLabelInput({
+function LayoutLabelSelect({
   value,
-  placeholder,
-  onCommit,
-  ...props
+  disabled,
+  ariaLabel,
+  onChange,
 }: {
   value: string;
-  placeholder: string;
-  onCommit: (value: string) => void;
-} & Omit<
-  InputHTMLAttributes<HTMLInputElement>,
-  "list" | "value" | "placeholder" | "onChange" | "onCommit"
->) {
-  const [draft, setDraft] = useState(value);
-  const cancelRef = useRef(false);
-
-  useEffect(() => {
-    setDraft(value);
-  }, [value]);
-
-  const commit = () => {
-    if (cancelRef.current) {
-      cancelRef.current = false;
-      return;
-    }
-    if (draft !== value) onCommit(draft);
-  };
+  disabled?: boolean;
+  ariaLabel: string;
+  onChange: (value: string) => void;
+}) {
+  const options = layoutLabelOptions(value);
 
   return (
-    <input
-      {...props}
-      list="oarlabel-layout-labels"
-      value={draft}
-      placeholder={placeholder}
+    <select
+      value={value}
+      disabled={disabled}
+      aria-label={ariaLabel}
       onMouseDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        e.stopPropagation();
-        if (e.key === "Escape") {
-          cancelRef.current = true;
-          setDraft(value);
-          e.currentTarget.blur();
-        } else if (e.key === "Enter") {
-          e.currentTarget.blur();
-        }
-      }}
-      className="h-7 min-w-0 flex-1 rounded border border-input bg-transparent px-1.5 text-sm font-medium outline-none focus:border-primary"
-    />
+      onKeyDown={(e) => e.stopPropagation()}
+      onChange={(e) => onChange(e.target.value)}
+      className="h-7 min-w-0 flex-1 rounded border border-input bg-background px-1.5 text-sm font-medium outline-none focus:border-primary disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      {options.map((option) => (
+        <option key={option} value={option}>
+          {option}
+        </option>
+      ))}
+    </select>
   );
 }
 
