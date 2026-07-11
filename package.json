@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
-    "check": "npm run typecheck && npm run lint && npm run test",
+    "check:versions": "node scripts/check-versions.mjs",
+    "check": "npm run check:versions && npm run typecheck && npm run lint && npm run test",
     "build": "npm run typecheck && vite build",
     "preview": "vite preview",
     "tauri": "tauri"
