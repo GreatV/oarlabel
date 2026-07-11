@@ -13,7 +13,8 @@ dist-ssr
 *.local
 
 # Bundled OCR models
-src-tauri/models/
+src-tauri/models/*
+!src-tauri/models/README.md
 
 # Editor directories and files
 .vscode/*

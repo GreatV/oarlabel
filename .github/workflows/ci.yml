@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Tauri system dependencies
         run: |
@@ -28,7 +28,7 @@ jobs:
             libssl-dev \
             patchelf
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -57,11 +57,11 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
   macos-rust:
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
