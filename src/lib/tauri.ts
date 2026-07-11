@@ -8,6 +8,7 @@ import { t, tt, type Locale } from "@/i18n";
 import type {
   CustomOcrPaths,
   DeviceOption,
+  ExportKind,
   ImageItem,
   InferenceTuning,
   ModelOptions,
@@ -19,7 +20,12 @@ import type {
 } from "@/types";
 
 export function fileSrc(path: string): string {
-  return convertFileSrc(path);
+  return convertFileSrc(path, "workspace");
+}
+
+export interface ExportDatasetResult {
+  path: string;
+  skipped: number;
 }
 
 export async function pickFile(title: string, extensions?: string[]): Promise<string | null> {
@@ -50,13 +56,16 @@ export function confirmReplaceBatchAnnotations(
   imageCount: number,
   annotatedImageCount: number,
   annotationCount: number,
+  damagedImageCount = 0,
 ): Promise<boolean> {
   return confirm(
-    tt(locale, "confirm.replaceBatchAnnotations.message", {
-      imageCount,
-      annotatedImageCount,
-      annotationCount,
-    }),
+    tt(
+      locale,
+      damagedImageCount > 0
+        ? "confirm.replaceBatchAnnotationsDamaged.message"
+        : "confirm.replaceBatchAnnotations.message",
+      { imageCount, annotatedImageCount, annotationCount, damagedImageCount },
+    ),
     { title: t(locale, "confirm.replaceAnnotations.title"), kind: "warning" },
   );
 }
@@ -73,27 +82,16 @@ export function askSaveAndCompleteCurrent(locale: Locale): Promise<boolean> {
   );
 }
 
-const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "bmp", "webp", "gif", "tif", "tiff"];
-
 /** Pick one or more image files. Returns their absolute paths. */
 export async function pickImages(title: string, filterName: string): Promise<string[]> {
+  const extensions = await invoke<string[]>("image_extensions");
   const res = await open({
     multiple: true,
     title,
-    filters: [{ name: filterName, extensions: IMAGE_EXTENSIONS }],
+    filters: [{ name: filterName, extensions }],
   });
   if (Array.isArray(res)) return res;
   return typeof res === "string" ? [res] : [];
-}
-
-/** Pick a single PDF file. Returns its absolute path. */
-export async function pickPdf(title: string): Promise<string | null> {
-  const res = await open({
-    multiple: false,
-    title,
-    filters: [{ name: "PDF", extensions: ["pdf"] }],
-  });
-  return typeof res === "string" ? res : null;
 }
 
 /** Open an external URL in the user's default browser. */
@@ -108,13 +106,13 @@ export const api = {
     invoke<Omit<ImageItem, "status">[]>("list_images", { dir }),
   imageItems: (paths: string[]) =>
     invoke<Omit<ImageItem, "status">[]>("image_items", { paths }),
-  importPdf: (pdfPath: string) =>
-    invoke<Omit<ImageItem, "status">[]>("import_pdf", { pdfPath }),
   imageSize: (path: string) => invoke<[number, number]>("image_size", { path }),
   readAnnotation: (imagePath: string) =>
     invoke<string | null>("read_annotation", { imagePath }),
   saveAnnotation: (imagePath: string, data: string) =>
     invoke<void>("save_annotation", { imagePath, data }),
+  backupAnnotation: (imagePath: string) =>
+    invoke<string | null>("backup_annotation", { imagePath }),
   availableDevices: () => invoke<DeviceOption[]>("available_devices"),
   modelStatus: () => invoke<ModelStatus[]>("model_status"),
   modelOptions: () => invoke<ModelOptions>("model_options"),
@@ -175,10 +173,13 @@ export const api = {
   pickExportDirectory: (title: string) =>
     invoke<string | null>("pick_export_directory", { title }),
   exportDataset: (
-    images: { path: string; boxes: { points: number[][]; transcription: string }[] }[],
+    images: {
+      path: string;
+      boxes: { points: number[][]; transcription: string; label?: string }[];
+    }[],
     outDir: string,
-    kind: "detection" | "recognition",
-  ) => invoke<string>("export_dataset", { images, outDir, kind }),
+    kind: ExportKind,
+  ) => invoke<ExportDatasetResult>("export_dataset", { images, outDir, kind }),
 };
 
 // Frameless window controls.

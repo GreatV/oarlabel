@@ -6,12 +6,12 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PathAccess {
-    images: Mutex<HashSet<PathBuf>>,
-    export_dir: Mutex<Option<PathBuf>>,
+    images: Arc<Mutex<HashSet<PathBuf>>>,
+    export_dir: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl PathAccess {
@@ -126,6 +126,12 @@ mod tests {
             .expect("replace workspace");
         assert!(access.require_image(&first.to_string_lossy()).is_err());
         assert!(access.require_image(&second.to_string_lossy()).is_ok());
+
+        access
+            .replace_images(&[first.to_string_lossy().into_owned()])
+            .expect("reopen first workspace");
+        assert!(access.require_image(&first.to_string_lossy()).is_ok());
+        assert!(access.require_image(&second.to_string_lossy()).is_err());
         std::fs::remove_dir_all(dir).ok();
     }
 

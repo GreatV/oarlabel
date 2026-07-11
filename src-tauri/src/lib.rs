@@ -7,7 +7,6 @@ mod geometry;
 mod menu;
 mod models;
 mod ocr;
-mod pdf;
 mod project;
 
 use serde::Deserialize;
@@ -73,6 +72,12 @@ struct MenuPayload {
     recent_dirs: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct MenuItemStatePayload {
+    id: String,
+    value: bool,
+}
+
 /// Parse a menu-rebuild event payload into (locale, ViewState). The backend is
 /// deliberately strict here: invalid payloads must not silently rebuild the
 /// native menu in another language.
@@ -108,9 +113,37 @@ fn normalize_locale(locale: &str) -> Option<String> {
     }
 }
 
+fn image_content_type(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("tif" | "tiff") => "image/tiff",
+        _ => "application/octet-stream",
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_menu_payload;
+    use super::{image_content_type, parse_menu_payload};
+    use std::path::Path;
+
+    #[test]
+    fn workspace_protocol_uses_image_content_types() {
+        assert_eq!(image_content_type(Path::new("page.JPG")), "image/jpeg");
+        assert_eq!(image_content_type(Path::new("page.png")), "image/png");
+        assert_eq!(
+            image_content_type(Path::new("page.unknown")),
+            "application/octet-stream"
+        );
+    }
 
     #[test]
     fn parse_menu_payload_accepts_structured_payload() {
@@ -160,27 +193,34 @@ fn init_logging() {
 }
 
 #[tauri::command]
-fn list_images(
-    app: AppHandle,
+async fn list_images(
     access: State<'_, access::PathAccess>,
     dir: String,
 ) -> Result<Vec<project::ImageItem>, String> {
-    let items = project::list_images(&dir)?;
-    activate_image_workspace(&app, &access, items)
+    let access = access.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let items = project::list_images(&dir)?;
+        activate_image_workspace(&access, items)
+    })
+    .await
+    .map_err(|e| format!("Image listing task failed: {e}"))?
 }
 
 #[tauri::command]
-fn image_items(
-    app: AppHandle,
+async fn image_items(
     access: State<'_, access::PathAccess>,
     paths: Vec<String>,
 ) -> Result<Vec<project::ImageItem>, String> {
-    let items = project::image_items(&paths);
-    activate_image_workspace(&app, &access, items)
+    let access = access.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let items = project::image_items(&paths);
+        activate_image_workspace(&access, items)
+    })
+    .await
+    .map_err(|e| format!("Image import task failed: {e}"))?
 }
 
 fn activate_image_workspace(
-    app: &AppHandle,
     access: &access::PathAccess,
     mut items: Vec<project::ImageItem>,
 ) -> Result<Vec<project::ImageItem>, String> {
@@ -189,64 +229,77 @@ fn activate_image_workspace(
         .map(|item| item.path.clone())
         .collect::<Vec<_>>();
     let canonical = access.replace_images(&paths)?;
-    let scope = app.asset_protocol_scope();
     for (item, path) in items.iter_mut().zip(canonical) {
-        scope
-            .allow_file(&path)
-            .map_err(|e| format!("Failed to authorize image access: {e}"))?;
         item.path = path.to_string_lossy().into_owned();
     }
     Ok(items)
 }
 
 #[tauri::command]
-async fn import_pdf(
-    app: AppHandle,
+async fn image_size(
     access: State<'_, access::PathAccess>,
-    pdf_path: String,
-) -> Result<Vec<project::ImageItem>, String> {
-    let default_root = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| e.to_string())?
-        .join("pdf-pages");
-    // PDF pages always go to the application cache; the caller cannot select
-    // an arbitrary write location.
-    let items =
-        tauri::async_runtime::spawn_blocking(move || pdf::import_pdf(&pdf_path, &default_root))
-            .await
-            .map_err(|e| format!("PDF import task failed: {e}"))??;
-    activate_image_workspace(&app, &access, items)
+    path: String,
+) -> Result<(u32, u32), String> {
+    let access = access.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = access.require_image(&path)?;
+        project::image_size(&path.to_string_lossy())
+    })
+    .await
+    .map_err(|e| format!("Image size task failed: {e}"))?
 }
 
 #[tauri::command]
-fn image_size(access: State<'_, access::PathAccess>, path: String) -> Result<(u32, u32), String> {
-    let path = access.require_image(&path)?;
-    project::image_size(&path.to_string_lossy())
-}
-
-#[tauri::command]
-fn read_annotation(
+async fn read_annotation(
     access: State<'_, access::PathAccess>,
     image_path: String,
 ) -> Result<Option<String>, String> {
-    let path = access.require_image(&image_path)?;
-    project::read_annotation(&path.to_string_lossy())
+    let access = access.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = access.require_image(&image_path)?;
+        project::read_annotation(&path.to_string_lossy())
+    })
+    .await
+    .map_err(|e| format!("Annotation read task failed: {e}"))?
 }
 
 #[tauri::command]
-fn save_annotation(
+async fn save_annotation(
     access: State<'_, access::PathAccess>,
     image_path: String,
     data: String,
 ) -> Result<(), String> {
-    let path = access.require_image(&image_path)?;
-    project::save_annotation(&path.to_string_lossy(), &data)
+    let access = access.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = access.require_image(&image_path)?;
+        project::save_annotation(&path.to_string_lossy(), &data)
+    })
+    .await
+    .map_err(|e| format!("Annotation save task failed: {e}"))?
+}
+
+#[tauri::command]
+async fn backup_annotation(
+    access: State<'_, access::PathAccess>,
+    image_path: String,
+) -> Result<Option<String>, String> {
+    let access = access.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = access.require_image(&image_path)?;
+        project::backup_annotation(&path.to_string_lossy())
+    })
+    .await
+    .map_err(|e| format!("Annotation backup task failed: {e}"))?
 }
 
 #[tauri::command]
 fn available_devices() -> Vec<devices::DeviceOption> {
     devices::available_devices()
+}
+
+#[tauri::command]
+fn image_extensions() -> Vec<&'static str> {
+    project::IMAGE_EXTS.to_vec()
 }
 
 #[tauri::command]
@@ -475,7 +528,7 @@ async fn export_dataset(
     mut images: Vec<export::ExportImage>,
     out_dir: String,
     kind: String,
-) -> Result<String, String> {
+) -> Result<export::ExportResult, String> {
     let out_dir = access
         .require_export_dir(&out_dir)?
         .to_string_lossy()
@@ -489,6 +542,7 @@ async fn export_dataset(
     tauri::async_runtime::spawn_blocking(move || match kind.as_str() {
         "detection" => export::export_detection(&images, &out_dir),
         "recognition" => export::export_recognition(&images, &out_dir),
+        "layout" => export::export_layout(&images, &out_dir),
         other => Err(format!("Unknown export type: {other}")),
     })
     .await
@@ -500,6 +554,53 @@ pub fn run() {
     init_logging();
 
     tauri::Builder::default()
+        // Unlike Tauri's append-only asset scope, this protocol checks the
+        // current PathAccess set for every request. Switching workspaces
+        // therefore revokes old image URLs immediately while still allowing a
+        // previously used workspace to be opened again later in the session.
+        .register_uri_scheme_protocol("workspace", |ctx, request| {
+            let respond = |status, content_type, body| {
+                tauri::http::Response::builder()
+                    .status(status)
+                    .header(tauri::http::header::CONTENT_TYPE, content_type)
+                    .body(body)
+                    .expect("valid workspace protocol response")
+            };
+            let encoded = request
+                .uri()
+                .path()
+                .as_bytes()
+                .strip_prefix(b"/")
+                .unwrap_or_default();
+            let Ok(decoded) = percent_encoding::percent_decode(encoded).decode_utf8() else {
+                return respond(
+                    tauri::http::StatusCode::BAD_REQUEST,
+                    "text/plain",
+                    b"invalid image path".to_vec(),
+                );
+            };
+            let access = ctx.app_handle().state::<access::PathAccess>();
+            let Ok(path) = access.require_image(&decoded) else {
+                return respond(
+                    tauri::http::StatusCode::FORBIDDEN,
+                    "text/plain",
+                    b"image is outside the current workspace".to_vec(),
+                );
+            };
+            let content_type = image_content_type(&path);
+            match std::fs::read(&path) {
+                Ok(bytes) => respond(tauri::http::StatusCode::OK, content_type, bytes),
+                Err(error) => respond(
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        tauri::http::StatusCode::NOT_FOUND
+                    } else {
+                        tauri::http::StatusCode::INTERNAL_SERVER_ERROR
+                    },
+                    "text/plain",
+                    b"failed to read image".to_vec(),
+                ),
+            }
+        })
         .manage(access::PathAccess::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -510,9 +611,9 @@ pub fn run() {
             // Help links open in the browser directly from Rust (no need to
             // round-trip through the frontend).
             if let Some(which) = id.strip_prefix("oar:help:") {
-                let repo = "https://github.com/GreatV/oar-ocr";
+                let repo = "https://github.com/GreatV/oarlabel";
                 let url = match which {
-                    "docs" => format!("{repo}/blob/master/docs/usage.md"),
+                    "docs" => format!("{repo}#readme"),
                     "faq" => format!("{repo}#readme"),
                     "feedback" => format!("{repo}/issues"),
                     "update" => format!("{repo}/releases"),
@@ -575,32 +676,23 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             let handle = app.handle().clone();
             app.listen("oar:set-menu-state", move |event| {
-                if let Some(payload) = event
-                    .payload()
-                    .strip_prefix('"')
-                    .and_then(|s| s.strip_suffix('"'))
-                {
-                    // payload like "oar:view:fileList|true"
-                    if let Some((item_id, val)) = payload.split_once('|') {
-                        #[cfg(target_os = "macos")]
-                        menu::set_checked(&handle, item_id, val == "true");
-                        let _ = (item_id, val);
-                    }
+                if let Ok(payload) = serde_json::from_str::<MenuItemStatePayload>(event.payload()) {
+                    #[cfg(target_os = "macos")]
+                    menu::set_checked(&handle, &payload.id, payload.value);
+                    let _ = payload;
                 }
             });
 
             // Keep native menu availability aligned with the React UI. The
-            // frontend emits "item-id|true" whenever image/selection/history
-            // or busy state changes.
+            // frontend emits a structured `{ id, value }` payload whenever
+            // image/selection/history or busy state changes.
             #[cfg(target_os = "macos")]
             let handle = app.handle().clone();
             app.listen("oar:set-menu-enabled", move |event| {
-                if let Ok(payload) = serde_json::from_str::<String>(event.payload()) {
-                    if let Some((item_id, value)) = payload.split_once('|') {
-                        #[cfg(target_os = "macos")]
-                        menu::set_enabled(&handle, item_id, value == "true");
-                        let _ = (item_id, value);
-                    }
+                if let Ok(payload) = serde_json::from_str::<MenuItemStatePayload>(event.payload()) {
+                    #[cfg(target_os = "macos")]
+                    menu::set_enabled(&handle, &payload.id, payload.value);
+                    let _ = payload;
                 }
             });
             Ok(())
@@ -608,11 +700,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_images,
             image_items,
-            import_pdf,
             image_size,
             read_annotation,
             save_annotation,
+            backup_annotation,
             available_devices,
+            image_extensions,
             model_status,
             model_options,
             read_custom_ocr_paths,

@@ -6,7 +6,9 @@ use std::path::Path;
 use walkdir::WalkDir;
 
 const MAX_SCAN_DEPTH: usize = 16;
-const MAX_SCAN_ENTRIES: usize = 50_000;
+// Large enough that 20k images plus their JSON sidecars reach the dedicated
+// image limit first, while still bounding accidental scans of a home folder.
+const MAX_SCAN_ENTRIES: usize = 100_000;
 const MAX_SCAN_IMAGES: usize = 20_000;
 
 #[derive(Serialize)]
@@ -15,7 +17,7 @@ pub struct ImageItem {
     pub name: String,
 }
 
-const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "bmp", "webp", "gif", "tif", "tiff"];
+pub const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "bmp", "webp", "gif", "tif", "tiff"];
 
 fn is_image(path: &Path) -> bool {
     path.extension()
@@ -56,6 +58,7 @@ fn list_images_with_limits(
 ) -> Result<Vec<ImageItem>, String> {
     let mut v = Vec::new();
     let mut entries = 0usize;
+    let mut skipped_deep_directories = 0usize;
     for entry in WalkDir::new(root)
         .follow_links(false)
         .max_depth(max_depth)
@@ -68,13 +71,13 @@ fn list_images_with_limits(
         entries += 1;
         if entries > max_entries {
             return Err(format!(
-                "Directory scan stopped after {max_entries} entries. Please choose a smaller image folder."
+                "Directory scan stopped after {max_entries} filesystem entries ({} images found). Please choose a smaller image folder.",
+                v.len()
             ));
         }
         if entry.depth() == max_depth && entry.file_type().is_dir() {
-            return Err(format!(
-                "Directory scan exceeded the maximum depth of {max_depth}. Please choose a smaller image folder."
-            ));
+            skipped_deep_directories += 1;
+            continue;
         }
         let path = entry.path();
         if path.is_file() && is_image(path) {
@@ -85,6 +88,14 @@ fn list_images_with_limits(
                 ));
             }
         }
+    }
+    if skipped_deep_directories > 0 {
+        tracing::warn!(
+            max_depth,
+            skipped_directories = skipped_deep_directories,
+            root = %root.display(),
+            "directory scan skipped branches at the maximum depth"
+        );
     }
     v.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(v)
@@ -200,6 +211,48 @@ pub fn read_annotation(image_path: &str) -> Result<Option<String>, String> {
     Ok(None)
 }
 
+/// Preserve an unreadable or structurally invalid sidecar before the frontend
+/// replaces it. Returns the backup path, or None when no sidecar exists.
+pub fn backup_annotation(image_path: &str) -> Result<Option<String>, String> {
+    let current = annotation_path(image_path)?;
+    let source = if current.is_file() {
+        Some(current)
+    } else {
+        legacy_annotation_path(image_path).filter(|path| path.is_file())
+    };
+    let Some(source) = source else {
+        return Ok(None);
+    };
+
+    let base = source.with_file_name(format!(
+        "{}.bak",
+        source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("Invalid annotation path: {}", source.display()))?
+    ));
+    let mut backup = base.clone();
+    let mut suffix = 1usize;
+    while backup.exists() {
+        backup = base.with_file_name(format!(
+            "{}.{}",
+            base.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("annotation.json.bak"),
+            suffix
+        ));
+        suffix += 1;
+    }
+    std::fs::copy(&source, &backup).map_err(|e| {
+        format!(
+            "Failed to back up annotation {} to {}: {e}",
+            source.display(),
+            backup.display()
+        )
+    })?;
+    Ok(Some(backup.to_string_lossy().into_owned()))
+}
+
 pub fn save_annotation(image_path: &str, data: &str) -> Result<(), String> {
     let p = annotation_path(image_path)?;
     let tmp = p.with_extension("json.tmp");
@@ -269,6 +322,25 @@ mod tests {
     }
 
     #[test]
+    fn backup_annotation_preserves_existing_sidecar() {
+        let dir = temp_workspace("backup");
+        let image = dir.join("scan.png");
+        std::fs::write(&image, b"png").unwrap();
+        std::fs::write(dir.join("scan.png.json"), b"broken json").unwrap();
+
+        let backup = backup_annotation(image.to_str().unwrap())
+            .unwrap()
+            .expect("backup path");
+
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), "broken json");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("scan.png.json")).unwrap(),
+            "broken json"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn directory_scan_rejects_image_count_over_limit() {
         let dir = temp_workspace("scan-image-limit");
         for name in ["one.png", "two.jpg", "three.webp"] {
@@ -293,19 +365,24 @@ mod tests {
         let err = list_images_with_limits(&dir, 8, 3, 100)
             .err()
             .expect("scan should exceed entry limit");
-        assert!(err.contains("after 3 entries"));
+        assert!(err.contains("after 3 filesystem entries"));
         std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
-    fn directory_scan_rejects_excessive_depth() {
+    fn directory_scan_skips_excessive_depth_without_failing() {
         let dir = temp_workspace("scan-depth-limit");
+        std::fs::write(dir.join("visible.png"), b"image placeholder").unwrap();
         std::fs::create_dir_all(dir.join("level-one/level-two")).unwrap();
+        std::fs::write(
+            dir.join("level-one/level-two/hidden.png"),
+            b"image placeholder",
+        )
+        .unwrap();
 
-        let err = list_images_with_limits(&dir, 1, 100, 100)
-            .err()
-            .expect("scan should exceed depth limit");
-        assert!(err.contains("maximum depth of 1"));
+        let items = list_images_with_limits(&dir, 1, 100, 100).expect("scan should succeed");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "visible.png");
         std::fs::remove_dir_all(dir).ok();
     }
 }
