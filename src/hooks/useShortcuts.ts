@@ -1,22 +1,30 @@
 import { useEffect } from "react";
 import { win } from "@/lib/tauri";
-import { shouldIgnoreGlobalShortcut } from "@/lib/keyboard";
+import {
+  imageNavigationDirection,
+  isRedoShortcut,
+  shouldIgnoreGlobalShortcut,
+} from "@/lib/keyboard";
 import { useStore } from "@/store";
 
-export function useShortcuts() {
+export function useShortcuts(openSettings?: () => void) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (shouldIgnoreGlobalShortcut(e.target)) return;
       const s = useStore.getState();
       const meta = e.ctrlKey || e.metaKey;
+      const navigation = imageNavigationDirection(e);
 
-      if (meta && e.key.toLowerCase() === "s") {
+      if (meta && e.key === "," && openSettings) {
+        e.preventDefault();
+        openSettings();
+      } else if (meta && e.key.toLowerCase() === "s") {
         e.preventDefault();
         s.save();
       } else if (meta && e.key === "Enter") {
         e.preventDefault();
         void s.saveAndNext();
-      } else if (meta && e.shiftKey && e.key.toLowerCase() === "z") {
+      } else if (meta && isRedoShortcut(e)) {
         e.preventDefault();
         s.redo();
       } else if (meta && e.key.toLowerCase() === "z") {
@@ -43,10 +51,10 @@ export function useShortcuts() {
       } else if (e.key === "F11") {
         e.preventDefault();
         win.toggleFullscreen();
-      } else if (!meta && e.key === "ArrowRight") {
-        s.next();
-      } else if (!meta && e.key === "ArrowLeft") {
-        s.prev();
+      } else if (navigation) {
+        e.preventDefault();
+        if (navigation === "next") s.next();
+        else s.prev();
       } else if (!meta && (e.key === "r" || e.key === "R")) {
         s.setTool(s.tool === "rect" ? "select" : "rect");
       } else if (!meta && (e.key === "p" || e.key === "P")) {
@@ -55,5 +63,5 @@ export function useShortcuts() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [openSettings]);
 }

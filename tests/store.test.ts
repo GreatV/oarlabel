@@ -8,10 +8,13 @@ const mocks = vi.hoisted(() => ({
   confirmReplaceBatchAnnotations: vi.fn(),
   readAnnotation: vi.fn(),
   saveAnnotation: vi.fn(),
+  backupAnnotation: vi.fn(),
   preannotate: vi.fn(),
   cancelPreannotation: vi.fn(),
   recognizeTextRegions: vi.fn(),
   recognizeFormulaRegions: vi.fn(),
+  listImages: vi.fn(),
+  imageItems: vi.fn(),
 }));
 
 vi.mock("@/lib/tauri", () => ({
@@ -22,10 +25,13 @@ vi.mock("@/lib/tauri", () => ({
   api: {
     readAnnotation: mocks.readAnnotation,
     saveAnnotation: mocks.saveAnnotation,
+    backupAnnotation: mocks.backupAnnotation,
     preannotate: mocks.preannotate,
     cancelPreannotation: mocks.cancelPreannotation,
     recognizeTextRegions: mocks.recognizeTextRegions,
     recognizeFormulaRegions: mocks.recognizeFormulaRegions,
+    listImages: mocks.listImages,
+    imageItems: mocks.imageItems,
   },
 }));
 
@@ -40,6 +46,7 @@ const {
   normalizeRecentDirs,
   normalizeStoredLocale,
   normalizeViewOptions,
+  parseAnnotationFile,
   useStore,
 } = await import("@/store");
 
@@ -62,6 +69,19 @@ const annotation: Annotation = {
   ],
 };
 
+const ocrAnnotation: Annotation = {
+  ...annotation,
+  results: [
+    {
+      task: "text_detection",
+      value: { label: "text" },
+      score: 1,
+      source: "manual",
+    },
+    ...annotation.results,
+  ],
+};
+
 const images: ImageItem[] = [
   { path: "/images/a.png", name: "a.png", status: "labeling" },
   { path: "/images/b.png", name: "b.png", status: "preannotated" },
@@ -72,10 +92,13 @@ beforeEach(() => {
   storage.clear();
   mocks.readAnnotation.mockResolvedValue(null);
   mocks.saveAnnotation.mockResolvedValue(undefined);
+  mocks.backupAnnotation.mockResolvedValue("/images/a.png.json.bak");
   mocks.preannotate.mockResolvedValue({ boxes: [], skipped: 0 });
   mocks.cancelPreannotation.mockResolvedValue(undefined);
   mocks.recognizeTextRegions.mockResolvedValue({ regions: [], skipped: 0 });
   mocks.recognizeFormulaRegions.mockResolvedValue({ regions: [], skipped: 0 });
+  mocks.listImages.mockResolvedValue([]);
+  mocks.imageItems.mockResolvedValue([]);
   mocks.askSaveAndCompleteCurrent.mockResolvedValue(false);
   mocks.confirmDiscardChanges.mockResolvedValue(true);
   mocks.confirmReplaceAnnotations.mockResolvedValue(true);
@@ -89,13 +112,18 @@ beforeEach(() => {
     },
     dirty: false,
     dirtyPaths: {},
+    annotationErrors: {},
     busy: false,
     batchRunning: false,
     batchCancelRequested: false,
+    batchActivePath: null,
+    batchPendingPaths: {},
     exportRunning: false,
     exportTotal: 0,
     exportDone: 0,
     exportCancelRequested: false,
+    exportSourceFailures: [],
+    exportSourceSkipped: 0,
     selectedIds: [],
     selectedId: null,
     clipboard: [],
@@ -142,6 +170,51 @@ describe("stored preference normalization", () => {
 });
 
 describe("annotation persistence", () => {
+  it("rejects file-level corruption but preserves valid entries", () => {
+    expect(() => parseAnnotationFile("[]")).toThrow("root must be an object");
+    const parsed = parseAnnotationFile(
+      JSON.stringify({ status: "pending", annotations: [annotation, {}] }),
+    );
+    expect(parsed.annotations).toEqual([{ ...annotation, hidden: false }]);
+    expect(parsed.skippedAnnotations).toBe(1);
+    expect(parsed.invalidAnnotationIndices).toEqual([1]);
+
+    const twoPoint = { ...annotation, points: annotation.points.slice(0, 2) };
+    const invalidGeometry = parseAnnotationFile(
+      JSON.stringify({ status: "pending", annotations: [twoPoint] }),
+    );
+    expect(invalidGeometry.annotations).toEqual([]);
+    expect(invalidGeometry.skippedAnnotations).toBe(1);
+  });
+
+  it("backs up an unreadable sidecar before replacing it", async () => {
+    useStore.setState({
+      dirty: true,
+      dirtyPaths: { [images[0].path]: true },
+      annotationErrors: { [images[0].path]: "invalid JSON" },
+    });
+
+    await expect(useStore.getState().save()).resolves.toBe(true);
+
+    expect(mocks.backupAnnotation).toHaveBeenCalledWith(images[0].path);
+    expect(mocks.saveAnnotation).toHaveBeenCalledOnce();
+    expect(useStore.getState().annotationErrors).toEqual({});
+  });
+
+  it("localizes the guard against saving an unreadable unedited sidecar", async () => {
+    useStore.setState({
+      annos: {},
+      dirty: true,
+      dirtyPaths: { [images[0].path]: true },
+      annotationErrors: { [images[0].path]: "invalid JSON" },
+      locale: "zh-CN",
+    });
+
+    await expect(useStore.getState().save()).resolves.toBe(false);
+    expect(useStore.getState().statusMsg).toContain("原标注文件无法读取");
+    expect(mocks.saveAnnotation).not.toHaveBeenCalled();
+  });
+
   it("saves only the currently displayed image", async () => {
     useStore.setState({
       dirty: true,
@@ -162,9 +235,13 @@ describe("annotation persistence", () => {
     expect(useStore.getState().dirty).toBe(true);
     expect(useStore.getState().statusMsg).toBe("当前图片已保存");
     expect(useStore.getState().images.map((image) => image.status)).toEqual([
-      "labeling",
+      "done",
       "preannotated",
     ]);
+    const saved = JSON.parse(String(mocks.saveAnnotation.mock.calls[0][1])) as {
+      status: string;
+    };
+    expect(saved.status).toBe("done");
   });
 
   it("keeps all dirty state when saving the current image fails", async () => {
@@ -194,6 +271,15 @@ describe("annotation persistence", () => {
     await useStore.getState().selectIndex(1);
 
     expect(mocks.saveAnnotation).not.toHaveBeenCalled();
+    expect(mocks.askSaveAndCompleteCurrent).not.toHaveBeenCalled();
+    expect(useStore.getState().currentIndex).toBe(1);
+  });
+
+  it("does not prompt for an unchanged annotated image when auto-save is off", async () => {
+    useStore.setState({ autoSave: false, dirty: false, dirtyPaths: {} });
+
+    await useStore.getState().selectIndex(1);
+
     expect(mocks.askSaveAndCompleteCurrent).not.toHaveBeenCalled();
     expect(useStore.getState().currentIndex).toBe(1);
   });
@@ -243,6 +329,29 @@ describe("annotation persistence", () => {
   });
 });
 
+describe("workspace loading", () => {
+  it("shares one discard confirmation across rapid open requests", async () => {
+    let resolveConfirmation: (value: boolean) => void = () => undefined;
+    mocks.confirmDiscardChanges.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveConfirmation = resolve;
+        }),
+    );
+    useStore.setState({ dirty: true, dirtyPaths: { [images[0].path]: true } });
+
+    const first = useStore.getState().openFolder("/first");
+    const second = useStore.getState().openFolder("/second");
+    expect(mocks.confirmDiscardChanges).toHaveBeenCalledOnce();
+
+    resolveConfirmation(true);
+    await Promise.all([first, second]);
+
+    expect(mocks.listImages).toHaveBeenCalledOnce();
+    expect(mocks.listImages).toHaveBeenCalledWith("/second");
+  });
+});
+
 describe("annotation state invariants", () => {
   it("does not create dangling pasted selections while busy", () => {
     useStore.setState({
@@ -259,12 +368,28 @@ describe("annotation state invariants", () => {
     expect(useStore.getState().selectedId).toBeNull();
   });
 
+  it("keeps pasted annotations inside known image bounds", () => {
+    const nearEdge: Annotation = {
+      ...annotation,
+      points: [[90, 90], [100, 90], [100, 100], [90, 100]],
+    };
+    useStore.setState({
+      images: [{ ...images[0], width: 100, height: 100 }, images[1]],
+      clipboard: [nearEdge],
+    });
+
+    useStore.getState().paste();
+
+    const pasted = useStore.getState().currentAnnos().at(-1);
+    expect(pasted?.points).toEqual(nearEdge.points);
+  });
+
   it("drops selections that no longer exist after undo", () => {
     useStore.setState({
       images: [{ ...images[0], status: "done" }, images[1]],
       annos: { [images[0].path]: [annotation] },
       past: {
-        [images[0].path]: [{ annotations: [], status: "preannotated" }],
+        [images[0].path]: [{ annotations: [], status: "preannotated", dirty: true }],
       },
       selectedIds: [annotation.id],
       selectedId: annotation.id,
@@ -289,14 +414,38 @@ describe("annotation state invariants", () => {
     useStore.getState().undo();
     expect(useStore.getState().images[0].status).toBe("done");
     expect(useStore.getState().currentAnnos()[0].results[0].value.text).toBe("hello");
+    expect(useStore.getState().dirty).toBe(false);
 
     useStore.getState().redo();
     expect(useStore.getState().images[0].status).toBe("labeling");
     expect(useStore.getState().currentAnnos()[0].results[0].value.text).toBe("corrected");
+    expect(useStore.getState().dirty).toBe(true);
+  });
+
+  it("keeps a completed image completed when only canvas visibility changes", () => {
+    useStore.setState({ images: [{ ...images[0], status: "done" }, images[1]] });
+
+    useStore.getState().setAnnotationHidden(annotation.id, true);
+
+    expect(useStore.getState().images[0].status).toBe("done");
+    expect(useStore.getState().currentAnnos()[0].hidden).toBe(true);
   });
 });
 
 describe("recognition regions", () => {
+  it("does not add text recognition results in layout mode", async () => {
+    useStore.setState({
+      mode: "layout",
+      selectedIds: [annotation.id],
+      selectedId: annotation.id,
+    });
+
+    await useStore.getState().recognizeSelectedText();
+
+    expect(mocks.recognizeTextRegions).not.toHaveBeenCalled();
+    expect(useStore.getState().statusMsg).toContain("版面检测模式不支持文本识别");
+  });
+
   it("sends manually adjusted points to text recognition", async () => {
     const adjustedPoints: Annotation["points"] = [
       [20, 30],
@@ -450,6 +599,30 @@ describe("recognition regions", () => {
 });
 
 describe("pre-annotation settings", () => {
+  it("keeps OCR boxes with missing text and reports them without failing the image", async () => {
+    useStore.setState({ mode: "ocr", annos: { [images[0].path]: [] } });
+    mocks.preannotate.mockResolvedValue({
+      boxes: [
+        { points: annotation.points, text: null, label: null, score: 0.2 },
+        { points: annotation.points, text: "recognized", label: null, score: 0.9 },
+      ],
+      skipped: 1,
+    });
+
+    await useStore.getState().preannotateCurrent();
+
+    const texts = useStore
+      .getState()
+      .currentAnnos()
+      .map(
+        (item) =>
+          item.results.find((result) => result.task === "text_recognition")?.value.text,
+      );
+    expect(texts).toEqual(["", "recognized"]);
+    expect(useStore.getState().images[0].status).toBe("preannotated");
+    expect(useStore.getState().statusMsg).toContain("2 个区域识别失败或返回空文本");
+  });
+
   it("localizes the mode name in missing-result errors", async () => {
     useStore.setState({ mode: "formula", locale: "zh-CN" });
     mocks.preannotate.mockResolvedValue({
@@ -535,9 +708,27 @@ describe("pre-annotation settings", () => {
       const detail = String(errorLog.mock.calls[0][0]);
       expect(detail).toContain("a.png: Error: model failure");
       expect(detail).toContain("b.png: Error: model failure");
+      expect(useStore.getState().annotationErrors).toMatchObject({
+        [images[0].path]: expect.stringContaining("model failure"),
+        [images[1].path]: expect.stringContaining("model failure"),
+      });
     } finally {
       errorLog.mockRestore();
     }
+  });
+
+  it("does not count an OCR image as failed when one box has no text", async () => {
+    mocks.preannotate.mockResolvedValue({
+      boxes: [{ points: annotation.points, text: null, label: null, score: 0.2 }],
+      skipped: 0,
+    });
+
+    await useStore.getState().preannotateAll();
+
+    expect(mocks.preannotate).toHaveBeenCalledTimes(2);
+    expect(mocks.saveAnnotation).toHaveBeenCalledTimes(2);
+    expect(useStore.getState().statusMsg).toContain("批量预标注完成：2/2 张图片");
+    expect(useStore.getState().statusMsg).toContain("2 个区域识别失败或返回空文本");
   });
 
   it("releases saved non-current batch annotations and history", async () => {
@@ -551,19 +742,96 @@ describe("pre-annotation settings", () => {
     expect(state.future[images[1].path]).toBeUndefined();
   });
 
+  it("unlocks each completed image while later batch images are still running", async () => {
+    type Response = {
+      boxes: Array<{
+        points: Annotation["points"];
+        text: string;
+        label: null;
+        score: number;
+      }>;
+      skipped: number;
+    };
+    const finishInference: Array<(response: Response) => void> = [];
+    mocks.preannotate.mockImplementation(
+      () => new Promise<Response>((resolve) => finishInference.push(resolve)),
+    );
+
+    const run = useStore.getState().preannotateAll();
+    await vi.waitFor(() => expect(finishInference).toHaveLength(1));
+    expect(useStore.getState().batchPendingPaths).toMatchObject({
+      [images[0].path]: true,
+      [images[1].path]: true,
+    });
+
+    finishInference[0]({
+      boxes: [{ points: annotation.points, text: "first", label: null, score: 0.9 }],
+      skipped: 0,
+    });
+    await vi.waitFor(() => expect(finishInference).toHaveLength(2));
+
+    expect(useStore.getState().batchRunning).toBe(true);
+    expect(useStore.getState().batchPendingPaths[images[0].path]).toBeUndefined();
+    expect(useStore.getState().batchPendingPaths[images[1].path]).toBe(true);
+
+    const completedId = useStore.getState().currentAnnos()[0].id;
+    useStore.getState().setText(completedId, "reviewed");
+    expect(useStore.getState().currentAnnos()[0].results[1].value.text).toBe("reviewed");
+
+    await useStore.getState().selectIndex(1);
+    expect(useStore.getState().currentIndex).toBe(0);
+    expect(useStore.getState().statusMsg).toContain("仍在批量预标注队列中");
+
+    finishInference[1]({
+      boxes: [{ points: annotation.points, text: "second", label: null, score: 0.9 }],
+      skipped: 0,
+    });
+    await run;
+
+    expect(useStore.getState().batchRunning).toBe(false);
+    expect(useStore.getState().batchPendingPaths).toEqual({});
+  });
+
+  it("backs up and replaces unreadable sidecars without aborting the batch", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    useStore.setState({ annos: {} });
+    mocks.readAnnotation.mockImplementation((path: string) =>
+      path === images[0].path ? "{" : null,
+    );
+
+    try {
+      await useStore.getState().preannotateAll();
+
+      expect(mocks.confirmReplaceBatchAnnotations).toHaveBeenCalledWith(
+        "zh-CN",
+        2,
+        1,
+        1,
+        1,
+      );
+      expect(mocks.preannotate).toHaveBeenCalledTimes(2);
+      expect(mocks.backupAnnotation).toHaveBeenCalledWith(images[0].path);
+      expect(String(warning.mock.calls[0]?.[0])).toContain("a.png: SyntaxError");
+      expect(useStore.getState().statusMsg).not.toContain("检查已有标注失败");
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
   it("can cancel while inspecting a batch before inference starts", async () => {
-    let finishRead: (value: null) => void = () => undefined;
+    const finishReads: Array<(value: null) => void> = [];
     mocks.readAnnotation.mockImplementation(
       () => new Promise<null>((resolve) => {
-        finishRead = resolve;
+        finishReads.push(resolve);
       }),
     );
     useStore.setState({ annos: {} });
 
     const run = useStore.getState().preannotateAll();
     expect(useStore.getState().batchRunning).toBe(true);
+    await vi.waitFor(() => expect(finishReads).toHaveLength(2));
     useStore.getState().requestBatchCancel();
-    finishRead(null);
+    for (const finishRead of finishReads) finishRead(null);
     await run;
 
     expect(mocks.cancelPreannotation).toHaveBeenCalledOnce();
@@ -575,6 +843,82 @@ describe("pre-annotation settings", () => {
 });
 
 describe("export collection", () => {
+  it("keeps formula and layout annotations out of OCR exports", async () => {
+    const formula: Annotation = {
+      ...annotation,
+      id: "formula",
+      results: [
+        {
+          task: "layout_detection",
+          value: { label: "formula" },
+          score: 0.9,
+          source: "auto",
+        },
+        ...annotation.results,
+      ],
+    };
+    const layoutWithText: Annotation = {
+      ...annotation,
+      id: "layout-with-text",
+      results: [
+        {
+          task: "layout_detection",
+          value: { label: "title" },
+          score: 0.9,
+          source: "auto",
+        },
+        ...annotation.results,
+      ],
+    };
+    useStore.setState({
+      annos: {
+        [images[0].path]: [ocrAnnotation, formula, layoutWithText],
+        [images[1].path]: [],
+      },
+    });
+
+    await expect(useStore.getState().exportableImages("recognition")).resolves.toEqual([
+      {
+        path: images[0].path,
+        boxes: [
+          {
+            points: ocrAnnotation.points,
+            transcription: "hello",
+            label: "text",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("collects pure layout annotations for COCO export", async () => {
+    const layout: Annotation = {
+      ...annotation,
+      id: "layout-1",
+      results: [
+        {
+          task: "layout_detection",
+          value: { label: "title" },
+          score: 0.9,
+          source: "auto",
+        },
+      ],
+    };
+    useStore.setState({
+      annos: {
+        [images[0].path]: [layout],
+        [images[1].path]: [],
+      },
+    });
+
+    await expect(useStore.getState().exportableImages("layout")).resolves.toEqual([
+      {
+        path: images[0].path,
+        boxes: [{ points: layout.points, transcription: "", label: "title" }],
+      },
+    ]);
+  });
+
   it("reads sidecars concurrently and supports cancellation", async () => {
     const resolvers: Array<(value: string) => void> = [];
     mocks.readAnnotation.mockImplementation(
@@ -585,7 +929,7 @@ describe("export collection", () => {
     );
     useStore.setState({ annos: {} });
 
-    const run = useStore.getState().exportableImages();
+    const run = useStore.getState().exportableImages("recognition");
     await vi.waitFor(() => expect(resolvers).toHaveLength(2));
     expect(useStore.getState()).toMatchObject({
       exportRunning: true,
@@ -597,12 +941,39 @@ describe("export collection", () => {
     const sidecar = JSON.stringify({
       version: 1,
       status: "labeling",
-      annotations: [annotation],
+      annotations: [ocrAnnotation],
     });
     for (const resolve of resolvers) resolve(sidecar);
 
     await expect(run).resolves.toBeNull();
     expect(useStore.getState().exportRunning).toBe(false);
     expect(useStore.getState().exportCancelRequested).toBe(true);
+  });
+
+  it("skips unreadable files and invalid entries while exporting valid annotations", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    useStore.setState({ annos: {} });
+    mocks.readAnnotation.mockImplementation((path: string) =>
+      path === images[0].path
+        ? "{"
+        : JSON.stringify({
+            status: "labeling",
+            annotations: [ocrAnnotation, {}],
+          }),
+    );
+
+    try {
+      await expect(useStore.getState().exportableImages("recognition")).resolves.toEqual([
+        {
+          path: images[1].path,
+          boxes: [{ points: ocrAnnotation.points, transcription: "hello", label: "text" }],
+        },
+      ]);
+      expect(useStore.getState().exportSourceSkipped).toBe(2);
+      expect(useStore.getState().exportSourceFailures[0]).toContain(images[0].path);
+      expect(String(errorLog.mock.calls[0]?.[0])).toContain(images[0].path);
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 });
