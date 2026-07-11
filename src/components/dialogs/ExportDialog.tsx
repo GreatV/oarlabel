@@ -14,15 +14,14 @@ import { t, tt, type MessageKey } from "@/i18n";
 import { api } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useStore } from "@/store";
+import type { ExportKind } from "@/types";
 
 interface ExportDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-type Kind = "detection" | "recognition";
-
-const KINDS: { key: Kind; titleKey: MessageKey; descKey: MessageKey }[] = [
+const KINDS: { key: ExportKind; titleKey: MessageKey; descKey: MessageKey }[] = [
   {
     key: "detection",
     titleKey: "export.detectionTitle",
@@ -32,6 +31,11 @@ const KINDS: { key: Kind; titleKey: MessageKey; descKey: MessageKey }[] = [
     key: "recognition",
     titleKey: "export.recognitionTitle",
     descKey: "export.recognitionDesc",
+  },
+  {
+    key: "layout",
+    titleKey: "export.layoutTitle",
+    descKey: "export.layoutDesc",
   },
 ];
 
@@ -53,7 +57,7 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
       requestExportCancel: s.requestExportCancel,
     })),
   );
-  const [kind, setKind] = useState<Kind>("detection");
+  const [kind, setKind] = useState<ExportKind>("detection");
   const [outDir, setOutDir] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -67,27 +71,50 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
   };
 
   const run = async () => {
-    if (!outDir || useStore.getState().busy) return;
+    if (!outDir) return;
+    if (useStore.getState().busy) {
+      useStore.setState({ statusMsg: t(locale, "export.busy") });
+      return;
+    }
     setBusy(true);
     useStore.setState({ busy: true, statusMsg: t(locale, "message.exporting") });
     try {
       // Reading annotations across all images can throw (corrupt/missing
       // JSON); keep it inside the try so the error surfaces instead of
       // becoming an unhandled rejection with no UI feedback.
-      const payload = await useStore.getState().exportableImages();
+      const payload = await useStore.getState().exportableImages(kind);
 
       if (payload === null) {
         useStore.setState({ statusMsg: t(locale, "message.exportCancelled") });
         return;
       }
 
+      const { exportSourceFailures, exportSourceSkipped } = useStore.getState();
+      const sourceDetails = exportSourceFailures.length
+        ? tt(locale, "export.sourceSkipped", {
+            count: exportSourceSkipped,
+            files: exportSourceFailures.slice(0, 3).join("; "),
+          })
+        : exportSourceSkipped > 0
+          ? tt(locale, "export.sourceEntriesSkipped", { count: exportSourceSkipped })
+          : "";
+
       if (payload.length === 0) {
-        useStore.setState({ statusMsg: t(locale, "export.noAnnotations") });
+        useStore.setState({ statusMsg: sourceDetails || t(locale, "export.noAnnotations") });
         return;
       }
 
       const out = await api.exportDataset(payload, outDir, kind);
-      useStore.setState({ statusMsg: tt(locale, "export.done", { path: out }) });
+      const done = tt(locale, "export.done", { path: out.path });
+      useStore.setState({
+        statusMsg: [
+          done,
+          out.skipped > 0 ? tt(locale, "export.skipped", { count: out.skipped }) : "",
+          sourceDetails,
+        ]
+          .filter(Boolean)
+          .join(locale === "zh-CN" ? "，" : ", "),
+      });
       onOpenChange(false);
     } catch (e) {
       useStore.setState({ statusMsg: `${t(locale, "export.failed")}: ${String(e)}` });
@@ -110,7 +137,7 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
           <DialogDescription>{t(locale, "export.desc")}</DialogDescription>
         </DialogHeader>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-3 gap-3">
           {KINDS.map((k) => (
             <Button
               key={k.key}

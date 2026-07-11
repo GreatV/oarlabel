@@ -1,6 +1,7 @@
 // Shared domain types for the oarlabel frontend.
 
 export type Mode = "ocr" | "layout" | "formula";
+export type ExportKind = "detection" | "recognition" | "layout";
 
 /** UI theme. `system` follows the OS `prefers-color-scheme` setting. */
 export type Theme = "light" | "dark" | "system";
@@ -59,9 +60,8 @@ export interface PreannBox {
   score: number | null;
 }
 
-/** Result of a pre-annotation pass: successful boxes plus a count of regions
- *  that failed (crop/recognize) and were skipped. `skipped` is 0 for OCR and
- *  plain layout runs. */
+/** Result of a pre-annotation pass: usable boxes plus a count of regions that
+ *  failed recognition, were skipped, or returned no OCR text. */
 export interface PreannResult {
   boxes: PreannBox[];
   skipped: number;

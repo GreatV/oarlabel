@@ -9,6 +9,7 @@ Built with [Tauri](https://github.com/tauri-apps/tauri),
 ## Features
 
 - OCR, layout detection, and formula annotation modes
+- Detection/recognition exports for OCR and COCO export for layout annotations
 - Manual box editing with rectangle and polygon tools
 - AI pre-annotation for the current image or a batch of images
 - Per-image JSON annotation files
