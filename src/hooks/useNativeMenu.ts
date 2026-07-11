@@ -10,15 +10,21 @@ import { useEffect } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import { t, type MessageKey } from "@/i18n";
 import { isMac } from "@/lib/platform";
-import { api, pickImages, pickPdf } from "@/lib/tauri";
+import {
+  changedMenuStatePayloads,
+  nativeMenuEnabledState,
+  NATIVE_RECENT_LIMIT,
+} from "@/lib/nativeMenu";
+import { api, pickImages } from "@/lib/tauri";
 import { useStore } from "@/store";
+import type { SettingsSection } from "@/components/dialogs/SettingsDialog";
 import { DEFAULT_DEVICE_OPTIONS, VIEW_KEYS, type Device, type ModelOption, type Theme, type ViewOptions } from "@/types";
 
 /** Dialogs the native menu can open. Provided by App.tsx. */
 export interface NativeMenuOpeners {
   openFolder: () => Promise<void>;
   openExport: () => void;
-  openSettings: () => void;
+  openSettings: (section?: SettingsSection) => void;
   openShortcuts: () => void;
   openAbout: () => void;
 }
@@ -34,8 +40,6 @@ interface NativeMenuPayload {
   autoSave: boolean;
   recentDirs: string[];
 }
-
-const NATIVE_RECENT_LIMIT = 8;
 
 export function useNativeMenu(openers: NativeMenuOpeners): void {
   useEffect(() => {
@@ -62,44 +66,26 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
       const state = useStore.getState();
       const image = state.currentImage();
       const path = image?.path;
-      const hasImage = !!image;
-      const hasImages = state.images.length > 0;
-      const hasSelection = state.selectedIds.length > 0;
-      const idle = !state.busy;
-      const enabled: Record<string, boolean> = {
-        "oar:open-folder": idle,
-        "oar:import-images": idle,
-        "oar:import-pdf": idle,
-        "oar:save": hasImage && idle,
-        "oar:save-and-next": hasImage && idle,
-        "oar:export": hasImages && idle,
-        "oar:undo": !!path && (state.past[path]?.length ?? 0) > 0 && idle,
-        "oar:redo": !!path && (state.future[path]?.length ?? 0) > 0 && idle,
-        "oar:copy": hasSelection,
-        "oar:paste": hasImage && state.clipboard.length > 0 && idle,
-        "oar:select-all": hasImage,
-        "oar:clear-sel": hasSelection,
-        "oar:delete": hasSelection && idle,
-        "oar:zoom-in": hasImage,
-        "oar:zoom-out": hasImage,
-        "oar:actual": hasImage,
-        "oar:fit-window": hasImage,
-        "oar:fit-width": hasImage,
-        "oar:preannotate-current": hasImage && idle,
-        "oar:preannotate-all": hasImages && idle,
-      };
-      for (let index = 0; index < NATIVE_RECENT_LIMIT; index += 1) {
-        enabled[`oar:recent:${index}`] = index < state.recentDirs.length && idle;
-      }
-      return enabled;
+      const nextPath = state.images[state.currentIndex + 1]?.path;
+      return nativeMenuEnabledState({
+        hasImage: !!image,
+        hasImages: state.images.length > 0,
+        hasSelection: state.selectedIds.length > 0,
+        busy: state.busy,
+        batchRunning: state.batchRunning,
+        currentLocked: state.busy || (!!path && state.batchPendingPaths[path] === true),
+        nextLocked: !nextPath || state.batchPendingPaths[nextPath] === true,
+        hasUndo: !!path && (state.past[path]?.length ?? 0) > 0,
+        hasRedo: !!path && (state.future[path]?.length ?? 0) > 0,
+        hasClipboard: state.clipboard.length > 0,
+        recentCount: state.recentDirs.length,
+      });
     };
 
     const syncEnabled = (force = false) => {
       const next = enabledState();
-      for (const [id, enabled] of Object.entries(next)) {
-        if (force || lastEnabled[id] !== enabled) {
-          void emit("oar:set-menu-enabled", `${id}|${enabled}`);
-        }
+      for (const payload of changedMenuStatePayloads(lastEnabled, next, force)) {
+        void emit("oar:set-menu-enabled", payload);
       }
       lastEnabled = next;
     };
@@ -169,13 +155,16 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
       if (changed) {
         lastView = { ...view };
         for (const key of VIEW_KEYS) {
-          void emit("oar:set-menu-state", `oar:view:${key}|${view[key]}`);
+          void emit("oar:set-menu-state", { id: `oar:view:${key}`, value: view[key] });
         }
       }
       if (theme !== lastTheme) {
         lastTheme = theme;
         for (const key of ["light", "dark", "system"]) {
-          void emit("oar:set-menu-state", `oar:theme:${key}|${theme === key}`);
+          void emit("oar:set-menu-state", {
+            id: `oar:theme:${key}`,
+            value: theme === key,
+          });
         }
       }
       if (device !== lastDevice) {
@@ -184,12 +173,15 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
           ? useStore.getState().deviceOptions
           : DEFAULT_DEVICE_OPTIONS;
         for (const option of deviceOptions) {
-          void emit("oar:set-menu-state", `oar:device:${option.key}|${device === option.key}`);
+          void emit("oar:set-menu-state", {
+            id: `oar:device:${option.key}`,
+            value: device === option.key,
+          });
         }
       }
       if (autoSave !== lastAutoSave) {
         lastAutoSave = autoSave;
-        void emit("oar:set-menu-state", `oar:auto-save|${autoSave}`);
+        void emit("oar:set-menu-state", { id: "oar:auto-save", value: autoSave });
       }
       const syncModelGroup = (
         kind: "ocr" | "layout" | "formula",
@@ -199,7 +191,10 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
         for (const option of options ?? []) {
           void emit(
             "oar:set-menu-state",
-            `oar:model:${kind}:${option.key}|${option.key === selected}`,
+            {
+              id: `oar:model:${kind}:${option.key}`,
+              value: option.key === selected,
+            },
           );
         }
       };
@@ -255,19 +250,9 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
         fail(e, "message.loadFailed");
       }
     };
-    const importPdf = async () => {
-      try {
-        const pdf = await pickPdf(t(useStore.getState().locale, "picker.pdf"));
-        if (pdf) void useStore.getState().openPdf(pdf);
-      } catch (e) {
-        fail(e, "message.pdfImportFailed");
-      }
-    };
-
     const routes: Record<string, () => void> = {
       "oar:open-folder": () => void pickFolder(),
       "oar:import-images": () => void importImages(),
-      "oar:import-pdf": () => void importPdf(),
       "oar:save": () => void useStore.getState().save(),
       "oar:save-and-next": () => void useStore.getState().saveAndNext(),
       "oar:export": openers.openExport,
@@ -286,7 +271,8 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
       "oar:reset-layout": () => useStore.getState().resetLayout(),
       "oar:preannotate-current": () => void useStore.getState().preannotateCurrent(),
       "oar:preannotate-all": () => void useStore.getState().preannotateAll(),
-      "oar:settings": openers.openSettings,
+      "oar:settings": () => openers.openSettings("general"),
+      "oar:model-settings": () => openers.openSettings("models"),
       "oar:shortcuts": openers.openShortcuts,
       "oar:about": openers.openAbout,
     };
@@ -305,17 +291,12 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
       else if (kind === "formula") s.setFormulaModel(key);
     };
 
-    // Dispatch a single menu id, handling the dynamic prefixes
-    // (view toggles, language, device).
+    // Dispatch a single menu id, handling the dynamic prefixes.
     const dispatch = (id: string) => {
       if (routes[id]) return routes[id]();
       if (id.startsWith("oar:view:")) {
         const key = id.slice("oar:view:".length) as (typeof VIEW_KEYS)[number];
         useStore.getState().toggleView(key);
-        return;
-      }
-      if (id.startsWith("oar:lang:")) {
-        useStore.getState().setLocale(id.slice("oar:lang:".length) as "zh-CN" | "en-US");
         return;
       }
       if (id.startsWith("oar:device:")) {
@@ -347,7 +328,6 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
     // click works even before modelOptions has loaded and survives rebuilds.
     const ids = new Set<string>(Object.keys(routes));
     for (const k of VIEW_KEYS) ids.add(`oar:view:${k}`);
-    for (const l of ["zh-CN", "en-US"]) ids.add(`oar:lang:${l}`);
     for (const d of ["cpu", "cuda"]) ids.add(`oar:device:${d}`);
     for (const theme of ["light", "dark", "system"]) ids.add(`oar:theme:${theme}`);
     ids.add("oar:auto-save");

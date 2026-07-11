@@ -6,9 +6,7 @@ import {
   Copy,
   Cpu,
   FileImage,
-  FileText,
   FolderOpen,
-  Globe2,
   HelpCircle,
   Info,
   Keyboard,
@@ -32,10 +30,10 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { LOCALE_OPTIONS, t } from "@/i18n";
+import { t } from "@/i18n";
 import { LINKS } from "@/lib/links";
 import { shortcut } from "@/lib/platform";
-import { openExternal, pickImages, pickPdf, win } from "@/lib/tauri";
+import { openExternal, pickImages, win } from "@/lib/tauri";
 import { useStore } from "@/store";
 import { DEFAULT_DEVICE_OPTIONS, THEME_OPTIONS, type Device, type Theme } from "@/types";
 import {
@@ -54,12 +52,12 @@ import {
   MenubarSubTrigger,
   MenubarTrigger,
 } from "@/components/ui/menubar";
-import type { Locale } from "@/i18n";
+import type { SettingsSection } from "@/components/dialogs/SettingsDialog";
 
 interface MenuBarProps {
   onOpen: () => void;
   onExport: () => void;
-  onSettings: () => void;
+  onSettings: (section?: SettingsSection) => void;
   onShortcuts: () => void;
   onAbout: () => void;
   onClose: () => void;
@@ -82,7 +80,13 @@ export function MenuBar({
 }: MenuBarProps) {
   const s = useStore();
   const l = s.locale;
-  const hasImage = !!s.currentImage();
+  const currentImage = s.currentImage();
+  const hasImage = !!currentImage;
+  const currentLocked = s.busy || (!!currentImage && s.batchPendingPaths[currentImage.path] === true);
+  const batchConflict = s.busy || s.batchRunning;
+  const nextLocked = s.currentIndex < 0
+    || s.currentIndex >= s.images.length - 1
+    || s.batchPendingPaths[s.images[s.currentIndex + 1]?.path] === true;
   const hasSelection = s.selectedIds.length > 0;
   const modelOptions = s.modelOptions;
   const deviceOptions = s.deviceOptions.length ? s.deviceOptions : DEFAULT_DEVICE_OPTIONS;
@@ -91,29 +95,19 @@ export function MenuBar({
     const paths = await pickImages(t(l, "picker.images"), t(l, "picker.imageFilter"));
     if (paths.length) s.openFiles(paths);
   };
-  const handleImportPdf = async () => {
-    const pdf = await pickPdf(t(l, "picker.pdf"));
-    if (pdf) s.openPdf(pdf);
-  };
-
   return (
     <Menubar className="border-b bg-card px-2 py-1">
       <MenubarMenu>
         <MenubarTrigger>{t(l, "menu.file")}</MenubarTrigger>
         <MenubarContent className="min-w-[12rem]">
-          <MenubarItem onClick={handleImportImages} disabled={s.busy}>
-            <FileImage className={ico} />
-            {t(l, "menu.file.importImages")}
-          </MenubarItem>
-          <MenubarItem onClick={onOpen} disabled={s.busy}>
+          <MenubarItem onClick={onOpen} disabled={batchConflict}>
             <FolderOpen className={ico} />
             {t(l, "menu.file.importFolder")}
           </MenubarItem>
-          <MenubarItem onClick={handleImportPdf} disabled={s.busy}>
-            <FileText className={ico} />
-            {t(l, "menu.file.importPdf")}
+          <MenubarItem onClick={handleImportImages} disabled={batchConflict}>
+            <FileImage className={ico} />
+            {t(l, "menu.file.importImages")}
           </MenubarItem>
-
           <MenubarSub>
             <MenubarSubTrigger>
               <Clock className={ico} />
@@ -124,7 +118,7 @@ export function MenuBar({
                 <MenubarItem disabled>{t(l, "menu.file.noRecent")}</MenubarItem>
               ) : (
                 s.recentDirs.map((d) => (
-                  <MenubarItem key={d} disabled={s.busy} onClick={() => s.openFolder(d)} title={d}>
+                  <MenubarItem key={d} disabled={batchConflict} onClick={() => s.openFolder(d)} title={d}>
                     <span className="truncate">{baseName(d)}</span>
                   </MenubarItem>
                 ))
@@ -133,12 +127,12 @@ export function MenuBar({
           </MenubarSub>
 
           <MenubarSeparator />
-          <MenubarItem onClick={() => s.save()} disabled={!hasImage || s.busy}>
+          <MenubarItem onClick={() => s.save()} disabled={!hasImage || currentLocked}>
             <Save className={ico} />
             {t(l, "menu.file.save")}
             <MenubarShortcut>{shortcut("Ctrl+S")}</MenubarShortcut>
           </MenubarItem>
-          <MenubarItem onClick={() => void s.saveAndNext()} disabled={!hasImage || s.busy}>
+          <MenubarItem onClick={() => void s.saveAndNext()} disabled={!hasImage || currentLocked || nextLocked}>
             {t(l, "menu.file.saveAndNext")}
             <MenubarShortcut>{shortcut("Ctrl+Enter")}</MenubarShortcut>
           </MenubarItem>
@@ -148,7 +142,7 @@ export function MenuBar({
           >
             {t(l, "menu.file.autoSave")}
           </MenubarCheckboxItem>
-          <MenubarItem onClick={onExport} disabled={!s.images.length || s.busy}>
+          <MenubarItem onClick={onExport} disabled={!s.images.length || batchConflict}>
             <Upload className={ico} />
             {t(l, "menu.file.export")}
           </MenubarItem>
@@ -163,12 +157,12 @@ export function MenuBar({
       <MenubarMenu>
         <MenubarTrigger>{t(l, "menu.edit")}</MenubarTrigger>
         <MenubarContent className="min-w-[12rem]">
-          <MenubarItem onClick={() => s.undo()}>
+          <MenubarItem onClick={() => s.undo()} disabled={currentLocked}>
             <Undo2 className={ico} />
             {t(l, "menu.edit.undo")}
             <MenubarShortcut>{shortcut("Ctrl+Z")}</MenubarShortcut>
           </MenubarItem>
-          <MenubarItem onClick={() => s.redo()}>
+          <MenubarItem onClick={() => s.redo()} disabled={currentLocked}>
             <Redo2 className={ico} />
             {t(l, "menu.edit.redo")}
             <MenubarShortcut>{shortcut("Ctrl+Shift+Z")}</MenubarShortcut>
@@ -181,7 +175,7 @@ export function MenuBar({
           </MenubarItem>
           <MenubarItem
             onClick={() => s.paste()}
-            disabled={s.clipboard.length === 0 || !hasImage}
+            disabled={s.clipboard.length === 0 || !hasImage || currentLocked}
           >
             <ClipboardPaste className={ico} />
             {t(l, "menu.edit.paste")}
@@ -198,10 +192,16 @@ export function MenuBar({
             {t(l, "menu.edit.clearSelection")}
             <MenubarShortcut>Esc</MenubarShortcut>
           </MenubarItem>
-          <MenubarItem onClick={() => s.removeSelected()} disabled={!hasSelection}>
+          <MenubarItem onClick={() => s.removeSelected()} disabled={!hasSelection || currentLocked}>
             <Trash2 className={ico} />
             {t(l, "menu.edit.deleteSelected")}
             <MenubarShortcut>Del</MenubarShortcut>
+          </MenubarItem>
+          <MenubarSeparator />
+          <MenubarItem onClick={() => onSettings("general")}>
+            <SlidersHorizontal className={ico} />
+            {t(l, "menu.settings")}
+            <MenubarShortcut>{shortcut("Ctrl+,")}</MenubarShortcut>
           </MenubarItem>
         </MenubarContent>
       </MenubarMenu>
@@ -231,31 +231,38 @@ export function MenuBar({
           </MenubarItem>
 
           <MenubarSeparator />
-          <MenubarLabel>{t(l, "menu.view.panels")}</MenubarLabel>
-          <MenubarCheckboxItem checked={s.view.fileList} onCheckedChange={() => s.toggleView("fileList")}>
-            {t(l, "menu.view.showFileList")}
-          </MenubarCheckboxItem>
-          <MenubarCheckboxItem checked={s.view.results} onCheckedChange={() => s.toggleView("results")}>
-            {t(l, "menu.view.showResults")}
-          </MenubarCheckboxItem>
-          <MenubarCheckboxItem checked={s.view.toolbar} onCheckedChange={() => s.toggleView("toolbar")}>
-            {t(l, "menu.view.showToolbar")}
-          </MenubarCheckboxItem>
-          <MenubarCheckboxItem checked={s.view.statusBar} onCheckedChange={() => s.toggleView("statusBar")}>
-            {t(l, "menu.view.showStatusBar")}
-          </MenubarCheckboxItem>
+          <MenubarSub>
+            <MenubarSubTrigger>{t(l, "menu.view.panels")}</MenubarSubTrigger>
+            <MenubarSubContent>
+              <MenubarCheckboxItem checked={s.view.fileList} onCheckedChange={() => s.toggleView("fileList")}>
+                {t(l, "menu.view.showFileList")}
+              </MenubarCheckboxItem>
+              <MenubarCheckboxItem checked={s.view.results} onCheckedChange={() => s.toggleView("results")}>
+                {t(l, "menu.view.showResults")}
+              </MenubarCheckboxItem>
+              <MenubarCheckboxItem checked={s.view.toolbar} onCheckedChange={() => s.toggleView("toolbar")}>
+                {t(l, "menu.view.showToolbar")}
+              </MenubarCheckboxItem>
+              <MenubarCheckboxItem checked={s.view.statusBar} onCheckedChange={() => s.toggleView("statusBar")}>
+                {t(l, "menu.view.showStatusBar")}
+              </MenubarCheckboxItem>
+            </MenubarSubContent>
+          </MenubarSub>
 
-          <MenubarSeparator />
-          <MenubarLabel>{t(l, "menu.view.canvas")}</MenubarLabel>
-          <MenubarCheckboxItem checked={s.view.boxes} onCheckedChange={() => s.toggleView("boxes")}>
-            {t(l, "menu.view.showBoxes")}
-          </MenubarCheckboxItem>
-          <MenubarCheckboxItem checked={s.view.labels} onCheckedChange={() => s.toggleView("labels")}>
-            {t(l, "menu.view.showLabels")}
-          </MenubarCheckboxItem>
-          <MenubarCheckboxItem checked={s.view.highlight} onCheckedChange={() => s.toggleView("highlight")}>
-            {t(l, "menu.view.highlight")}
-          </MenubarCheckboxItem>
+          <MenubarSub>
+            <MenubarSubTrigger>{t(l, "menu.view.canvas")}</MenubarSubTrigger>
+            <MenubarSubContent>
+              <MenubarCheckboxItem checked={s.view.boxes} onCheckedChange={() => s.toggleView("boxes")}>
+                {t(l, "menu.view.showBoxes")}
+              </MenubarCheckboxItem>
+              <MenubarCheckboxItem checked={s.view.labels} onCheckedChange={() => s.toggleView("labels")}>
+                {t(l, "menu.view.showLabels")}
+              </MenubarCheckboxItem>
+              <MenubarCheckboxItem checked={s.view.highlight} onCheckedChange={() => s.toggleView("highlight")}>
+                {t(l, "menu.view.highlight")}
+              </MenubarCheckboxItem>
+            </MenubarSubContent>
+          </MenubarSub>
 
           <MenubarSeparator />
           <MenubarSub>
@@ -357,15 +364,16 @@ export function MenuBar({
           </MenubarSub>
 
           <MenubarSeparator />
-          <MenubarItem onClick={() => s.preannotateAll()} disabled={!s.images.length || s.busy}>
-            <Sparkles className={ico} />
-            {t(l, "menu.model.preannotateAll")}
-          </MenubarItem>
-          <MenubarItem onClick={() => s.preannotateCurrent()} disabled={!hasImage || s.busy}>
+          <MenubarItem onClick={() => s.preannotateCurrent()} disabled={!hasImage || batchConflict}>
             <FileImage className={ico} />
             {t(l, "menu.model.preannotateCurrent")}
           </MenubarItem>
-          <MenubarItem onClick={onSettings}>
+          <MenubarItem onClick={() => s.preannotateAll()} disabled={!s.images.length || batchConflict}>
+            <Sparkles className={ico} />
+            {t(l, "menu.model.preannotateAll")}
+          </MenubarItem>
+          <MenubarSeparator />
+          <MenubarItem onClick={() => onSettings("models")}>
             <SlidersHorizontal className={ico} />
             {t(l, "menu.model.settings")}
           </MenubarItem>
@@ -375,22 +383,6 @@ export function MenuBar({
       <MenubarMenu>
         <MenubarTrigger>{t(l, "menu.help")}</MenubarTrigger>
         <MenubarContent className="min-w-[12rem]">
-          <MenubarSub>
-            <MenubarSubTrigger>
-              <Globe2 className={ico} />
-              {t(l, "menu.language")}
-            </MenubarSubTrigger>
-            <MenubarSubContent>
-              <MenubarRadioGroup value={s.locale} onValueChange={(v) => s.setLocale(v as Locale)}>
-                {LOCALE_OPTIONS.map((o) => (
-                  <MenubarRadioItem key={o.key} value={o.key}>
-                    {t(l, o.labelKey)}
-                  </MenubarRadioItem>
-                ))}
-              </MenubarRadioGroup>
-            </MenubarSubContent>
-          </MenubarSub>
-          <MenubarSeparator />
           <MenubarItem onClick={() => openExternal(LINKS.docs)}>
             <BookOpen className={ico} />
             {t(l, "menu.help.docs")}
@@ -399,6 +391,11 @@ export function MenuBar({
             <HelpCircle className={ico} />
             {t(l, "menu.help.faq")}
           </MenubarItem>
+          <MenubarItem onClick={onShortcuts}>
+            <Keyboard className={ico} />
+            {t(l, "menu.help.shortcuts")}
+          </MenubarItem>
+          <MenubarSeparator />
           <MenubarItem onClick={() => openExternal(LINKS.issues)}>
             <MessageSquare className={ico} />
             {t(l, "menu.help.feedback")}
@@ -406,11 +403,6 @@ export function MenuBar({
           <MenubarItem onClick={() => openExternal(LINKS.releases)}>
             <RefreshCw className={ico} />
             {t(l, "menu.help.update")}
-          </MenubarItem>
-          <MenubarSeparator />
-          <MenubarItem onClick={onShortcuts}>
-            <Keyboard className={ico} />
-            {t(l, "menu.help.shortcuts")}
           </MenubarItem>
           <MenubarSeparator />
           <MenubarItem onClick={onAbout}>
