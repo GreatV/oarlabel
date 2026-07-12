@@ -1,7 +1,7 @@
 // Shared domain types for the oarlabel frontend.
 
 export type Mode = "ocr" | "layout" | "formula";
-export type ExportKind = "detection" | "recognition" | "layout";
+export type ExportKind = "detection" | "recognition" | "formula" | "layout";
 
 /** UI theme. `system` follows the OS `prefers-color-scheme` setting. */
 export type Theme = "light" | "dark" | "system";
@@ -83,16 +83,6 @@ export interface TextRecognitionRegionResult {
   skipped: number;
 }
 
-export interface ModelStatus {
-  key: string;
-  filename: string;
-  title: string;
-  size_label: string;
-  bundled: boolean;
-  present: boolean;
-  kind: string;
-}
-
 export interface ModelOption {
   key: string;
   title: string;
@@ -109,6 +99,8 @@ export interface CustomOcrPaths {
   textRecognitionModelPath: string;
   textRecognitionDictPath: string;
 }
+
+export const CUSTOM_OCR_PROFILE_KEY = "custom_text_ocr";
 
 export interface TextDetectionTuning {
   score_threshold?: number;

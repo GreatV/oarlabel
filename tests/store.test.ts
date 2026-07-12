@@ -115,6 +115,8 @@ beforeEach(() => {
     annotationErrors: {},
     busy: false,
     batchRunning: false,
+    batchPhase: null,
+    batchFailures: [],
     batchCancelRequested: false,
     batchActivePath: null,
     batchPendingPaths: {},
@@ -136,6 +138,18 @@ beforeEach(() => {
 });
 
 describe("stored preference normalization", () => {
+  it("supports selector subscriptions that ignore unrelated store updates", () => {
+    const listener = vi.fn();
+    const unsubscribe = useStore.subscribe((state) => state.locale, listener);
+
+    useStore.setState((state) => ({ zoom: state.zoom * 1.1 }));
+    expect(listener).not.toHaveBeenCalled();
+
+    useStore.getState().setLocale("en-US");
+    expect(listener).toHaveBeenCalledOnce();
+    unsubscribe();
+  });
+
   it("falls back safely for malformed locale and view values", () => {
     expect(normalizeStoredLocale("fr-FR")).toBe("zh-CN");
     expect(normalizeViewOptions({ fileList: false, toolbar: "invalid" })).toMatchObject({
@@ -712,9 +726,36 @@ describe("pre-annotation settings", () => {
         [images[0].path]: expect.stringContaining("model failure"),
         [images[1].path]: expect.stringContaining("model failure"),
       });
+      expect(useStore.getState().batchFailures).toEqual([
+        expect.stringContaining("a.png"),
+        expect.stringContaining("b.png"),
+      ]);
     } finally {
       errorLog.mockRestore();
     }
+  });
+
+  it("does not start inference before replacement is confirmed", async () => {
+    let resolveConfirmation!: (replace: boolean) => void;
+    mocks.confirmReplaceBatchAnnotations.mockImplementationOnce(
+      () => new Promise<boolean>((resolve) => {
+        resolveConfirmation = resolve;
+      }),
+    );
+
+    const run = useStore.getState().preannotateAll();
+    await vi.waitFor(() =>
+      expect(mocks.confirmReplaceBatchAnnotations).toHaveBeenCalledOnce(),
+    );
+
+    expect(useStore.getState().batchPhase).toBeNull();
+    expect(useStore.getState().batchRunning).toBe(false);
+    expect(mocks.preannotate).not.toHaveBeenCalled();
+
+    resolveConfirmation(false);
+    await run;
+    expect(mocks.preannotate).not.toHaveBeenCalled();
+    expect(useStore.getState().batchRunning).toBe(false);
   });
 
   it("does not count an OCR image as failed when one box has no text", async () => {
@@ -758,7 +799,7 @@ describe("pre-annotation settings", () => {
     );
 
     const run = useStore.getState().preannotateAll();
-    await vi.waitFor(() => expect(finishInference).toHaveLength(1));
+    await vi.waitFor(() => expect(finishInference).toHaveLength(2));
     expect(useStore.getState().batchPendingPaths).toMatchObject({
       [images[0].path]: true,
       [images[1].path]: true,
@@ -768,8 +809,9 @@ describe("pre-annotation settings", () => {
       boxes: [{ points: annotation.points, text: "first", label: null, score: 0.9 }],
       skipped: 0,
     });
-    await vi.waitFor(() => expect(finishInference).toHaveLength(2));
-
+    await vi.waitFor(() =>
+      expect(useStore.getState().batchPendingPaths[images[0].path]).toBeUndefined(),
+    );
     expect(useStore.getState().batchRunning).toBe(true);
     expect(useStore.getState().batchPendingPaths[images[0].path]).toBeUndefined();
     expect(useStore.getState().batchPendingPaths[images[1].path]).toBe(true);
@@ -792,53 +834,49 @@ describe("pre-annotation settings", () => {
     expect(useStore.getState().batchPendingPaths).toEqual({});
   });
 
-  it("backs up and replaces unreadable sidecars without aborting the batch", async () => {
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    useStore.setState({ annos: {} });
-    mocks.readAnnotation.mockImplementation((path: string) =>
-      path === images[0].path ? "{" : null,
-    );
+  it("backs up known unreadable sidecars without rescanning the batch", async () => {
+    useStore.setState({
+      annos: {},
+      annotationErrors: { [images[0].path]: "a.png: SyntaxError" },
+    });
 
-    try {
-      await useStore.getState().preannotateAll();
+    await useStore.getState().preannotateAll();
 
-      expect(mocks.confirmReplaceBatchAnnotations).toHaveBeenCalledWith(
-        "zh-CN",
-        2,
-        1,
-        1,
-        1,
-      );
-      expect(mocks.preannotate).toHaveBeenCalledTimes(2);
-      expect(mocks.backupAnnotation).toHaveBeenCalledWith(images[0].path);
-      expect(String(warning.mock.calls[0]?.[0])).toContain("a.png: SyntaxError");
-      expect(useStore.getState().statusMsg).not.toContain("检查已有标注失败");
-    } finally {
-      warning.mockRestore();
-    }
+    expect(mocks.confirmReplaceBatchAnnotations).toHaveBeenCalledWith("zh-CN");
+    expect(mocks.readAnnotation).not.toHaveBeenCalled();
+    expect(mocks.preannotate).toHaveBeenCalledTimes(2);
+    expect(mocks.backupAnnotation).toHaveBeenCalledWith(images[0].path);
+    expect(useStore.getState().statusMsg).not.toContain("检查已有标注失败");
   });
 
-  it("can cancel while inspecting a batch before inference starts", async () => {
-    const finishReads: Array<(value: null) => void> = [];
-    mocks.readAnnotation.mockImplementation(
-      () => new Promise<null>((resolve) => {
-        finishReads.push(resolve);
-      }),
-    );
-    useStore.setState({ annos: {} });
+  it("starts inference without rescanning annotation files", async () => {
+    useStore.setState({
+      images: images.map((image) => ({ ...image, status: "pending" as const })),
+      annos: {},
+    });
 
-    const run = useStore.getState().preannotateAll();
-    expect(useStore.getState().batchRunning).toBe(true);
-    await vi.waitFor(() => expect(finishReads).toHaveLength(2));
-    useStore.getState().requestBatchCancel();
-    for (const finishRead of finishReads) finishRead(null);
-    await run;
+    await useStore.getState().preannotateAll();
 
-    expect(mocks.cancelPreannotation).toHaveBeenCalledOnce();
-    expect(mocks.preannotate).not.toHaveBeenCalled();
-    expect(useStore.getState().batchRunning).toBe(false);
-    expect(useStore.getState().annos).toEqual({});
-    expect(useStore.getState().statusMsg).toContain("已取消批量预标注");
+    expect(mocks.confirmReplaceBatchAnnotations).not.toHaveBeenCalled();
+    expect(mocks.readAnnotation).not.toHaveBeenCalled();
+    expect(mocks.preannotate).toHaveBeenCalledTimes(2);
+  });
+
+  it("can skip images that already have annotations", async () => {
+    useStore.setState({
+      images: [images[0], { ...images[1], status: "pending" }],
+    });
+
+    await useStore.getState().preannotateAll({
+      skipAnnotated: true,
+      replacementConfirmed: true,
+    });
+
+    expect(mocks.confirmReplaceBatchAnnotations).not.toHaveBeenCalled();
+    expect(mocks.preannotate).toHaveBeenCalledOnce();
+    expect(mocks.preannotate.mock.calls[0][0]).toBe(images[1].path);
+    expect(mocks.saveAnnotation).toHaveBeenCalledOnce();
+    expect(useStore.getState().batchTotal).toBe(1);
   });
 });
 

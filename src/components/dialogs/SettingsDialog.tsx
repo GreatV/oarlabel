@@ -13,6 +13,7 @@ import { LOCALE_OPTIONS, t, type Locale } from "@/i18n";
 import { api, pickFile } from "@/lib/tauri";
 import { useStore } from "@/store";
 import {
+  CUSTOM_OCR_PROFILE_KEY,
   DEFAULT_DEVICE_OPTIONS,
   THEME_OPTIONS,
   type CustomOcrPaths,
@@ -20,20 +21,14 @@ import {
   type Theme,
 } from "@/types";
 
-export type SettingsSection = "general" | "annotation" | "models";
-
 interface SettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  initialSection?: SettingsSection;
 }
-
-const CUSTOM_OCR_PROFILE_KEY = "custom_text_ocr";
 
 export function SettingsDialog({
   open,
   onOpenChange,
-  initialSection = "general",
 }: SettingsDialogProps) {
   const locale = useStore((s) => s.locale);
   const setLocale = useStore((s) => s.setLocale);
@@ -55,28 +50,9 @@ export function SettingsDialog({
   });
   const [customPathsLoading, setCustomPathsLoading] = useState(false);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const sectionRefs = useRef<Record<SettingsSection, HTMLElement | null>>({
-    general: null,
-    annotation: null,
-    models: null,
-  });
   const deviceOptions = deviceOptionsFromStore.length
     ? deviceOptionsFromStore
     : DEFAULT_DEVICE_OPTIONS;
-
-  useEffect(() => {
-    if (!open) return;
-    const frame = requestAnimationFrame(() => {
-      const container = scrollRef.current;
-      const target = sectionRefs.current[initialSection];
-      if (!container || !target) return;
-      container.scrollTo({
-        top: initialSection === "general" ? 0 : target.offsetTop - container.offsetTop,
-      });
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [initialSection, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -180,58 +156,47 @@ export function SettingsDialog({
           <DialogDescription>{t(locale, "settings.description")}</DialogDescription>
         </DialogHeader>
 
-        <div ref={scrollRef} className="max-h-[65vh] overflow-y-auto pr-1">
-          <div
-            ref={(element) => {
-              sectionRefs.current.general = element;
-            }}
-          >
-            <SettingsGroup title={t(locale, "settings.appearanceTitle")}>
-              <SettingRow title={t(locale, "settings.language")}>
-                <div className="flex rounded-md border bg-background p-0.5" role="radiogroup">
-                  {LOCALE_OPTIONS.map((option) => (
-                    <Button
-                      key={option.key}
-                      type="button"
-                      size="sm"
-                      variant={locale === option.key ? "default" : "ghost"}
-                      className="h-7 rounded-sm"
-                      role="radio"
-                      aria-checked={locale === option.key}
-                      onClick={() => setLocale(option.key as Locale)}
-                    >
-                      {t(locale, option.labelKey)}
-                    </Button>
-                  ))}
-                </div>
-              </SettingRow>
-              <SettingRow title={t(locale, "settings.theme")}>
-                <div className="flex rounded-md border bg-background p-0.5" role="radiogroup">
-                  {THEME_OPTIONS.map((option) => (
-                    <Button
-                      key={option.key}
-                      type="button"
-                      size="sm"
-                      variant={theme === option.key ? "default" : "ghost"}
-                      className="h-7 rounded-sm"
-                      role="radio"
-                      aria-checked={theme === option.key}
-                      onClick={() => setTheme(option.key as Theme)}
-                    >
-                      {t(locale, option.labelKey)}
-                    </Button>
-                  ))}
-                </div>
-              </SettingRow>
-            </SettingsGroup>
-          </div>
+        <div className="max-h-[65vh] overflow-y-auto pr-1">
+          <SettingsGroup title={t(locale, "settings.appearanceTitle")}>
+            <SettingRow title={t(locale, "settings.language")}>
+              <div className="flex rounded-md border bg-background p-0.5" role="radiogroup">
+                {LOCALE_OPTIONS.map((option) => (
+                  <Button
+                    key={option.key}
+                    type="button"
+                    size="sm"
+                    variant={locale === option.key ? "default" : "ghost"}
+                    className="h-7 rounded-sm"
+                    role="radio"
+                    aria-checked={locale === option.key}
+                    onClick={() => setLocale(option.key as Locale)}
+                  >
+                    {t(locale, option.labelKey)}
+                  </Button>
+                ))}
+              </div>
+            </SettingRow>
+            <SettingRow title={t(locale, "settings.theme")}>
+              <div className="flex rounded-md border bg-background p-0.5" role="radiogroup">
+                {THEME_OPTIONS.map((option) => (
+                  <Button
+                    key={option.key}
+                    type="button"
+                    size="sm"
+                    variant={theme === option.key ? "default" : "ghost"}
+                    className="h-7 rounded-sm"
+                    role="radio"
+                    aria-checked={theme === option.key}
+                    onClick={() => setTheme(option.key as Theme)}
+                  >
+                    {t(locale, option.labelKey)}
+                  </Button>
+                ))}
+              </div>
+            </SettingRow>
+          </SettingsGroup>
 
-          <div
-            ref={(element) => {
-              sectionRefs.current.annotation = element;
-            }}
-          >
-            <SettingsGroup title={t(locale, "settings.annotationTitle")}>
+          <SettingsGroup title={t(locale, "settings.annotationTitle")}>
               <SettingRow
                 title={t(locale, "settings.minBoxSize")}
                 description={t(locale, "settings.minBoxSizeDesc")}
@@ -247,15 +212,9 @@ export function SettingsDialog({
                   onChange={(event) => setMinBoxSize(event.target.valueAsNumber)}
                 />
               </SettingRow>
-            </SettingsGroup>
-          </div>
+          </SettingsGroup>
 
-          <div
-            ref={(element) => {
-              sectionRefs.current.models = element;
-            }}
-          >
-            <SettingsGroup title={t(locale, "settings.inferenceTitle")}>
+          <SettingsGroup title={t(locale, "settings.inferenceTitle")}>
               <SettingRow title={t(locale, "settings.device")}>
                 <div className="flex rounded-md border bg-background p-0.5" role="radiogroup">
                   {deviceOptions.map((option) => (
@@ -407,7 +366,6 @@ export function SettingsDialog({
                 />
               </div>
             </SettingsGroup>
-          </div>
         </div>
       </DialogContent>
     </Dialog>

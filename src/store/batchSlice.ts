@@ -9,15 +9,17 @@ import {
 import { appendSkipped } from "@/store/messages";
 import type { AppState, BatchSlice, StoreRuntime } from "@/store/types";
 
-const LOAD_IPC_CONCURRENCY = 8;
+const INFERENCE_CONCURRENCY = 2;
 
 export const createBatchSlice = (
   runtime: StoreRuntime,
 ): StateCreator<AppState, [], [], BatchSlice> =>
   (set, get) => ({
     batchRunning: false,
+    batchPhase: null,
     batchTotal: 0,
     batchDone: 0,
+    batchFailures: [],
     batchCancelRequested: false,
     batchActivePath: null,
     batchPendingPaths: {},
@@ -45,179 +47,102 @@ export const createBatchSlice = (
         set({ busy: false });
       }
     },
-    preannotateAll: async () => {
-      const images = [...get().images];
-      if (!images.length || get().busy || get().batchRunning) return;
+    preannotateAll: async (options = {}) => {
+      const allImages = [...get().images];
+      if (!allImages.length || get().busy || get().batchRunning) return;
       const locale = get().locale;
-      set({
-        batchRunning: true,
-        batchTotal: images.length,
-        batchDone: 0,
-        batchCancelRequested: false,
-        batchActivePath: null,
-        batchPendingPaths: Object.fromEntries(
-          images.map((image) => [image.path, true] as const),
-        ),
-        statusMsg: t(locale, "message.inspectingAnnotations"),
-      });
-
-      let annotatedImageCount = 0;
-      let annotationCount = 0;
-      const damagedSidecars: string[] = [];
-      try {
-        let inspectedCount = 0;
-        const inspected = await mapLimited(
-          images,
-          LOAD_IPC_CONCURRENCY,
-          async (image) => {
-            try {
-              const count = await runtime.annotationCountForPath(image.path);
-              inspectedCount += 1;
-              set({
-                batchDone: inspectedCount,
-                statusMsg: tt(locale, "message.inspectingAnnotationsProgress", {
-                  current: inspectedCount,
-                  total: images.length,
-                  name: image.name,
-                }),
-              });
-              return { count, damaged: null };
-            } catch (error) {
-              const detail = `${image.name}: ${String(error)}`;
-              damagedSidecars.push(detail);
-              set((state) => ({
-                annotationErrors: {
-                  ...state.annotationErrors,
-                  [image.path]: detail,
-                },
-              }));
-              // The content is unknown, but the sidecar exists and will be
-              // replaced. Count one sentinel annotation so confirmation is
-              // never skipped for a destructive recovery.
-              return { count: 1, damaged: detail };
-            }
-          },
-          () => !get().batchCancelRequested,
-        );
-        for (const item of inspected) {
-          if (!item || item.count <= 0) continue;
-          annotatedImageCount += 1;
-          annotationCount += item.count;
-        }
-        if (damagedSidecars.length) {
-          console.warn(`Unreadable sidecars scheduled for replacement:\n${damagedSidecars.join("\n")}`);
-        }
-      } catch (error) {
-        set({
-          batchRunning: false,
-          batchCancelRequested: false,
-          batchActivePath: null,
-          batchPendingPaths: {},
-          statusMsg: `${t(get().locale, "message.inspectAnnotationsFailed")}: ${String(error)}`,
-        });
+      const isAnnotated = (image: (typeof allImages)[number]) =>
+        image.status !== "pending" || !!get().annotationErrors[image.path];
+      const hasExistingAnnotations = allImages.some(isAnnotated);
+      const images = options.skipAnnotated
+        ? allImages.filter((image) => !isAnnotated(image))
+        : allImages;
+      if (!images.length) {
+        set({ statusMsg: t(locale, "message.noUnannotatedImages") });
         return;
       }
-
-      if (get().batchCancelRequested) {
-        set({
-          batchRunning: false,
-          batchCancelRequested: false,
-          batchActivePath: null,
-          batchPendingPaths: {},
-          statusMsg: tt(locale, "message.batchPreannotateCancelled", {
-            completed: 0,
-            total: images.length,
-          }),
-        });
-        return;
-      }
-
-      if (annotationCount > 0) {
+      if (
+        hasExistingAnnotations &&
+        !options.skipAnnotated &&
+        !options.replacementConfirmed
+      ) {
         try {
-          const replace = await confirmReplaceBatchAnnotations(
-            get().locale,
-            images.length,
-            annotatedImageCount,
-            annotationCount,
-            damagedSidecars.length,
-          );
-          if (!replace) {
-            set({
-              batchRunning: false,
-              batchCancelRequested: false,
-              batchActivePath: null,
-              batchPendingPaths: {},
-            });
-            return;
-          }
+          if (!(await confirmReplaceBatchAnnotations(locale))) return;
         } catch (error) {
           set({
-            batchRunning: false,
-            batchCancelRequested: false,
-            batchActivePath: null,
-            batchPendingPaths: {},
-            statusMsg: `${t(get().locale, "message.preannotateFailed")}: ${String(error)}`,
+            statusMsg: `${t(locale, "message.preannotateFailed")}: ${String(error)}`,
           });
           return;
         }
       }
 
-      const params = runtime.snapshotPreannParams();
       set({
+        batchRunning: true,
+        batchPhase: "infer",
+        batchTotal: images.length,
         batchDone: 0,
+        batchFailures: [],
+        batchCancelRequested: false,
+        batchActivePath: null,
+        batchPendingPaths: Object.fromEntries(
+          images.map((image) => [image.path, true] as const),
+        ),
         statusMsg: tt(locale, "message.batchPreannotatingStart", { total: images.length }),
       });
+
+      const params = runtime.snapshotPreannParams();
       let completed = 0;
       let skippedTotal = 0;
       const failures: string[] = [];
-      let cancelled = false;
+      let started = 0;
+      let processed = 0;
       try {
-        for (let index = 0; index < images.length; index += 1) {
-          if (get().batchCancelRequested) {
-            cancelled = true;
-            break;
-          }
-          const image = images[index];
-          set({
-            batchDone: index,
-            batchActivePath: image.path,
-            statusMsg: tt(locale, "message.preannotatingProgressSaving", {
-              current: index + 1,
-              total: images.length,
-              name: image.name,
-            }),
-          });
-          try {
-            const { annos, skipped } = await runtime.runPreannotation(image.path, params);
-            runtime.applyPreannotation(image.path, annos);
-            await runtime.saveImageAfterBatchPreannotation(image.path);
-            skippedTotal += skipped;
-            completed += 1;
-          } catch (error) {
-            if (get().batchCancelRequested) {
-              cancelled = true;
-              break;
-            }
-            const detail = `${image.name}: ${String(error)}`;
-            failures.push(detail);
-            set((state) => ({
-              annotationErrors: {
-                ...state.annotationErrors,
-                [image.path]: detail,
-              },
-            }));
-          } finally {
-            set((state) => {
-              const batchPendingPaths = { ...state.batchPendingPaths };
-              delete batchPendingPaths[image.path];
-              return {
-                batchDone: index + 1,
-                batchActivePath: null,
-                batchPendingPaths,
-              };
+        await mapLimited(
+          images,
+          INFERENCE_CONCURRENCY,
+          async (image) => {
+            started += 1;
+            set({
+              batchActivePath: image.path,
+              statusMsg: tt(locale, "message.preannotatingProgressSaving", {
+                current: started,
+                total: images.length,
+                name: image.name,
+              }),
             });
-          }
-        }
+            try {
+              const { annos, skipped } = await runtime.runPreannotation(image.path, params);
+              runtime.applyPreannotation(image.path, annos);
+              await runtime.saveImageAfterBatchPreannotation(image.path);
+              skippedTotal += skipped;
+              completed += 1;
+            } catch (error) {
+              if (get().batchCancelRequested) return;
+              const detail = `${image.name}: ${String(error)}`;
+              failures.push(detail);
+              set((state) => ({
+                batchFailures: [...state.batchFailures, detail],
+                annotationErrors: {
+                  ...state.annotationErrors,
+                  [image.path]: detail,
+                },
+              }));
+            } finally {
+              processed += 1;
+              set((state) => {
+                const batchPendingPaths = { ...state.batchPendingPaths };
+                delete batchPendingPaths[image.path];
+                return {
+                  batchDone: processed,
+                  batchActivePath: null,
+                  batchPendingPaths,
+                };
+              });
+            }
+          },
+          () => !get().batchCancelRequested,
+        );
+        const cancelled = get().batchCancelRequested;
         const message = cancelled
           ? tt(locale, "message.batchPreannotateCancelled", { completed, total: images.length })
           : failures.length
@@ -235,6 +160,7 @@ export const createBatchSlice = (
       } finally {
         set({
           batchRunning: false,
+          batchPhase: null,
           batchCancelRequested: false,
           batchActivePath: null,
           batchPendingPaths: {},
@@ -246,6 +172,7 @@ export const createBatchSlice = (
       set({ batchCancelRequested: true });
       void api.cancelPreannotation().catch(() => undefined);
     },
+    clearBatchFailures: () => set({ batchFailures: [] }),
     // Explicit Save means the current image has been reviewed and completed.
     // Automatic saves during navigation intentionally keep the existing status.
     save: () => runtime.saveCurrentImage("done"),

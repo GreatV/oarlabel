@@ -4,7 +4,6 @@ import {
   ClipboardPaste,
   Clock,
   Copy,
-  Cpu,
   FileImage,
   FolderOpen,
   HelpCircle,
@@ -21,8 +20,6 @@ import {
   ScanText,
   Sigma,
   SlidersHorizontal,
-  Sparkles,
-  SunMoon,
   Trash2,
   Undo2,
   Upload,
@@ -30,12 +27,12 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import { useShallow } from "zustand/react/shallow";
 import { t } from "@/i18n";
 import { LINKS } from "@/lib/links";
 import { shortcut } from "@/lib/platform";
 import { openExternal, pickImages, win } from "@/lib/tauri";
 import { useStore } from "@/store";
-import { DEFAULT_DEVICE_OPTIONS, THEME_OPTIONS, type Device, type Theme } from "@/types";
 import {
   Menubar,
   MenubarCheckboxItem,
@@ -52,12 +49,11 @@ import {
   MenubarSubTrigger,
   MenubarTrigger,
 } from "@/components/ui/menubar";
-import type { SettingsSection } from "@/components/dialogs/SettingsDialog";
 
 interface MenuBarProps {
   onOpen: () => void;
   onExport: () => void;
-  onSettings: (section?: SettingsSection) => void;
+  onSettings: () => void;
   onShortcuts: () => void;
   onAbout: () => void;
   onClose: () => void;
@@ -78,18 +74,54 @@ export function MenuBar({
   onAbout,
   onClose,
 }: MenuBarProps) {
-  const s = useStore();
+  const s = useStore(
+    useShallow((state) => {
+      const currentImage = state.images[state.currentIndex];
+      const nextImage = state.images[state.currentIndex + 1];
+      return {
+        locale: state.locale,
+        hasImage: !!currentImage,
+        imageCount: state.images.length,
+        currentLocked:
+          state.busy || (!!currentImage && state.batchPendingPaths[currentImage.path] === true),
+        nextLocked:
+          state.currentIndex < 0 ||
+          state.currentIndex >= state.images.length - 1 ||
+          (!!nextImage && state.batchPendingPaths[nextImage.path] === true),
+        batchConflict: state.busy || state.batchRunning,
+        hasSelection: state.selectedIds.length > 0,
+        clipboardCount: state.clipboard.length,
+        recentDirs: state.recentDirs,
+        autoSave: state.autoSave,
+        view: state.view,
+        modelOptions: state.modelOptions,
+        ocrModel: state.ocrModel,
+        layoutModel: state.layoutModel,
+        formulaModel: state.formulaModel,
+        openFiles: state.openFiles,
+        openFolder: state.openFolder,
+        save: state.save,
+        saveAndNext: state.saveAndNext,
+        setAutoSave: state.setAutoSave,
+        undo: state.undo,
+        redo: state.redo,
+        copySelection: state.copySelection,
+        paste: state.paste,
+        selectAll: state.selectAll,
+        clearSelection: state.clearSelection,
+        removeSelected: state.removeSelected,
+        requestFit: state.requestFit,
+        toggleView: state.toggleView,
+        resetLayout: state.resetLayout,
+        setOcrModel: state.setOcrModel,
+        setLayoutModel: state.setLayoutModel,
+        setFormulaModel: state.setFormulaModel,
+      };
+    }),
+  );
   const l = s.locale;
-  const currentImage = s.currentImage();
-  const hasImage = !!currentImage;
-  const currentLocked = s.busy || (!!currentImage && s.batchPendingPaths[currentImage.path] === true);
-  const batchConflict = s.busy || s.batchRunning;
-  const nextLocked = s.currentIndex < 0
-    || s.currentIndex >= s.images.length - 1
-    || s.batchPendingPaths[s.images[s.currentIndex + 1]?.path] === true;
-  const hasSelection = s.selectedIds.length > 0;
+  const { hasImage, currentLocked, batchConflict, nextLocked, hasSelection } = s;
   const modelOptions = s.modelOptions;
-  const deviceOptions = s.deviceOptions.length ? s.deviceOptions : DEFAULT_DEVICE_OPTIONS;
 
   const handleImportImages = async () => {
     const paths = await pickImages(t(l, "picker.images"), t(l, "picker.imageFilter"));
@@ -142,7 +174,7 @@ export function MenuBar({
           >
             {t(l, "menu.file.autoSave")}
           </MenubarCheckboxItem>
-          <MenubarItem onClick={onExport} disabled={!s.images.length || batchConflict}>
+          <MenubarItem onClick={onExport} disabled={!s.imageCount || batchConflict}>
             <Upload className={ico} />
             {t(l, "menu.file.export")}
           </MenubarItem>
@@ -175,7 +207,7 @@ export function MenuBar({
           </MenubarItem>
           <MenubarItem
             onClick={() => s.paste()}
-            disabled={s.clipboard.length === 0 || !hasImage || currentLocked}
+            disabled={s.clipboardCount === 0 || !hasImage || currentLocked}
           >
             <ClipboardPaste className={ico} />
             {t(l, "menu.edit.paste")}
@@ -198,7 +230,7 @@ export function MenuBar({
             <MenubarShortcut>Del</MenubarShortcut>
           </MenubarItem>
           <MenubarSeparator />
-          <MenubarItem onClick={() => onSettings("general")}>
+          <MenubarItem onClick={onSettings}>
             <SlidersHorizontal className={ico} />
             {t(l, "menu.settings")}
             <MenubarShortcut>{shortcut("Ctrl+,")}</MenubarShortcut>
@@ -209,12 +241,24 @@ export function MenuBar({
       <MenubarMenu>
         <MenubarTrigger>{t(l, "menu.view")}</MenubarTrigger>
         <MenubarContent className="min-w-[12rem]">
-          <MenubarItem onClick={() => s.setZoom(s.zoom * 1.2)} disabled={!hasImage}>
+          <MenubarItem
+            onClick={() => {
+              const state = useStore.getState();
+              state.setZoom(state.zoom * 1.2);
+            }}
+            disabled={!hasImage}
+          >
             <ZoomIn className={ico} />
             {t(l, "menu.view.zoomIn")}
             <MenubarShortcut>{shortcut("Ctrl+=")}</MenubarShortcut>
           </MenubarItem>
-          <MenubarItem onClick={() => s.setZoom(s.zoom / 1.2)} disabled={!hasImage}>
+          <MenubarItem
+            onClick={() => {
+              const state = useStore.getState();
+              state.setZoom(state.zoom / 1.2);
+            }}
+            disabled={!hasImage}
+          >
             <ZoomOut className={ico} />
             {t(l, "menu.view.zoomOut")}
             <MenubarShortcut>{shortcut("Ctrl+-")}</MenubarShortcut>
@@ -261,23 +305,6 @@ export function MenuBar({
               <MenubarCheckboxItem checked={s.view.highlight} onCheckedChange={() => s.toggleView("highlight")}>
                 {t(l, "menu.view.highlight")}
               </MenubarCheckboxItem>
-            </MenubarSubContent>
-          </MenubarSub>
-
-          <MenubarSeparator />
-          <MenubarSub>
-            <MenubarSubTrigger>
-              <SunMoon className={ico} />
-              {t(l, "menu.view.theme")}
-            </MenubarSubTrigger>
-            <MenubarSubContent>
-              <MenubarRadioGroup value={s.theme} onValueChange={(v) => s.setTheme(v as Theme)}>
-                {THEME_OPTIONS.map((o) => (
-                  <MenubarRadioItem key={o.key} value={o.key}>
-                    {t(l, o.labelKey)}
-                  </MenubarRadioItem>
-                ))}
-              </MenubarRadioGroup>
             </MenubarSubContent>
           </MenubarSub>
 
@@ -346,37 +373,6 @@ export function MenuBar({
             </MenubarSubContent>
           </MenubarSub>
 
-          <MenubarSeparator />
-          <MenubarSub>
-            <MenubarSubTrigger>
-              <Cpu className={ico} />
-              {t(l, "menu.model.device")}
-            </MenubarSubTrigger>
-            <MenubarSubContent>
-              <MenubarRadioGroup value={s.device} onValueChange={(v) => s.setDevice(v as Device)}>
-                {deviceOptions.map((o) => (
-                  <MenubarRadioItem key={o.key} value={o.key}>
-                    {o.label}
-                  </MenubarRadioItem>
-                ))}
-              </MenubarRadioGroup>
-            </MenubarSubContent>
-          </MenubarSub>
-
-          <MenubarSeparator />
-          <MenubarItem onClick={() => s.preannotateCurrent()} disabled={!hasImage || batchConflict}>
-            <FileImage className={ico} />
-            {t(l, "menu.model.preannotateCurrent")}
-          </MenubarItem>
-          <MenubarItem onClick={() => s.preannotateAll()} disabled={!s.images.length || batchConflict}>
-            <Sparkles className={ico} />
-            {t(l, "menu.model.preannotateAll")}
-          </MenubarItem>
-          <MenubarSeparator />
-          <MenubarItem onClick={() => onSettings("models")}>
-            <SlidersHorizontal className={ico} />
-            {t(l, "menu.model.settings")}
-          </MenubarItem>
         </MenubarContent>
       </MenubarMenu>
 

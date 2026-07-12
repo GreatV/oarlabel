@@ -16,7 +16,9 @@ import {
   Upload,
 } from "lucide-react";
 import { useEffect, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { Button } from "@/components/ui/button";
+import { BatchPreannotationDialog } from "@/components/dialogs/BatchPreannotationDialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -99,17 +101,39 @@ function targetDock(x: number, y: number, width: number, height: number): Toolba
 }
 
 export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) {
-  const s = useStore();
-  const l = s.locale;
-  const currentImage = s.currentImage();
+  const s = useStore(
+    useShallow((state) => ({
+      l: state.locale,
+      currentImage: state.currentImage(),
+      busy: state.busy,
+      batchRunning: state.batchRunning,
+      batchPendingPaths: state.batchPendingPaths,
+      currentIndex: state.currentIndex,
+      imageCount: state.images.length,
+      previousPath: state.images[state.currentIndex - 1]?.path,
+      nextPath: state.images[state.currentIndex + 1]?.path,
+      mode: state.mode,
+      save: state.save,
+      prev: state.prev,
+      next: state.next,
+      setMode: state.setMode,
+      preannotateAll: state.preannotateAll,
+      hasExistingAnnotations: state.images.some(
+        (image) => image.status !== "pending" || !!state.annotationErrors[image.path],
+      ),
+      preannotateCurrent: state.preannotateCurrent,
+    })),
+  );
+  const l = s.l;
+  const currentImage = s.currentImage;
   const hasImage = !!currentImage;
   const currentLocked = s.busy || (!!currentImage && s.batchPendingPaths[currentImage.path] === true);
   const batchConflict = s.busy || s.batchRunning;
   const previousLocked = s.currentIndex <= 0
-    || s.batchPendingPaths[s.images[s.currentIndex - 1]?.path] === true;
+    || (!!s.previousPath && s.batchPendingPaths[s.previousPath] === true);
   const nextLocked = s.currentIndex < 0
-    || s.currentIndex >= s.images.length - 1
-    || s.batchPendingPaths[s.images[s.currentIndex + 1]?.path] === true;
+    || s.currentIndex >= s.imageCount - 1
+    || (!!s.nextPath && s.batchPendingPaths[s.nextPath] === true);
   const vertical = dock === "left" || dock === "right";
   // Horizontal toolbar: hide button captions below `xl` (≈1280px) so the bar
   // collapses to icon-only instead of wrapping/overflowing when the window is
@@ -117,6 +141,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
   // buttons stack with no horizontal pressure; tooltips still label controls.
   const labelCls = vertical ? undefined : "hidden xl:inline";
   const [dragging, setDragging] = useState(false);
+  const [batchDialogOpen, setBatchDialogOpen] = useState(false);
   const [guideDock, setGuideDock] = useState<ToolbarDock | null>(null);
   const [droppableDock, setDroppableDock] = useState<ToolbarDock | null>(null);
 
@@ -170,6 +195,10 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
   }, [dragging]);
 
   const side = tipSide(dock);
+  const requestBatchPreannotation = () => {
+    if (s.hasExistingAnnotations) setBatchDialogOpen(true);
+    else void s.preannotateAll({ replacementConfirmed: true });
+  };
 
   return (
     <>
@@ -257,7 +286,7 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
 
         <Separator orientation={vertical ? "horizontal" : "vertical"} className={cn(vertical ? "my-1" : "mx-2 h-7")} />
         <Tip label={t(l, "toolbar.export")} side={side}>
-          <Button variant="ghost" className={cn("px-2", vertical && "w-full")} onClick={onExport} disabled={!s.images.length || batchConflict}>
+          <Button variant="ghost" className={cn("px-2", vertical && "w-full")} onClick={onExport} disabled={!s.imageCount || batchConflict}>
             <Upload className="h-4 w-4" />
             <span className={labelCls}>{t(l, "toolbar.export")}</span>
           </Button>
@@ -297,8 +326,8 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
                 variant="ghost"
                 size="sm"
                 className="h-9 w-full gap-1.5"
-                onClick={() => s.preannotateAll()}
-                disabled={!s.images.length || batchConflict}
+                onClick={requestBatchPreannotation}
+                disabled={!s.imageCount || batchConflict}
               >
                 <Sparkles className="h-4 w-4" />
                 {t(l, "toolbar.preannotateAll")}
@@ -347,8 +376,8 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
               variant="ghost"
               size="sm"
               className="h-9 gap-1.5"
-              onClick={() => s.preannotateAll()}
-              disabled={!s.images.length || batchConflict}
+              onClick={requestBatchPreannotation}
+              disabled={!s.imageCount || batchConflict}
             >
               <Sparkles className="h-4 w-4" />
               <span className={labelCls}>{t(l, "toolbar.preannotateAll")}</span>
@@ -386,6 +415,13 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
           </div>
         </div>
       )}
+      <BatchPreannotationDialog
+        open={batchDialogOpen}
+        onOpenChange={setBatchDialogOpen}
+        onConfirm={(skipAnnotated) =>
+          void s.preannotateAll({ skipAnnotated, replacementConfirmed: true })
+        }
+      />
     </>
   );
 }
@@ -393,9 +429,18 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
 /** Tool selector group. Rendered once and shared by the vertical/horizontal
  *  toolbar layouts so tooltips/styling stay in sync. */
 function ToolGroup({ vertical, side }: { vertical: boolean; side: "top" | "bottom" | "left" | "right" }) {
-  const s = useStore();
-  const l = s.locale;
-  const currentImage = s.currentImage();
+  const s = useStore(
+    useShallow((state) => ({
+      l: state.locale,
+      currentImage: state.currentImage(),
+      busy: state.busy,
+      batchPendingPaths: state.batchPendingPaths,
+      tool: state.tool,
+      setTool: state.setTool,
+    })),
+  );
+  const l = s.l;
+  const currentImage = s.currentImage;
   const hasImage = !!currentImage;
   const currentLocked = s.busy || (!!currentImage && s.batchPendingPaths[currentImage.path] === true);
   // Mirror the main toolbar: collapse captions to icon-only on narrow widths

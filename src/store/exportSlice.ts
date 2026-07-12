@@ -36,9 +36,19 @@ export const createExportSlice = (
               const matching = file.annotations.filter((annotation) => {
                 const hasTask = (task: string) =>
                   annotation.results.some((result) => result.task === task);
-                return kind === "layout"
-                  ? hasTask("layout_detection")
-                  : hasTask("text_detection") && hasTask("text_recognition");
+                if (kind === "layout") return hasTask("layout_detection");
+                if (kind === "formula") {
+                  return (
+                    hasTask("text_recognition") &&
+                    annotation.results.some(
+                      (result) =>
+                        result.task === "layout_detection" &&
+                        typeof result.value.label === "string" &&
+                        result.value.label.trim().toLowerCase() === "formula",
+                    )
+                  );
+                }
+                return hasTask("text_detection") && hasTask("text_recognition");
               });
               const invalidGeometryCount = matching.filter(
                 (annotation) => annotation.points.length < 3,

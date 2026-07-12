@@ -38,20 +38,6 @@ pub enum ModelKind {
     FormulaTokenizer,
 }
 
-impl ModelKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ModelKind::Det => "det",
-            ModelKind::Rec => "rec",
-            ModelKind::Dict => "dict",
-            ModelKind::TextLineOrientation => "text_line_orientation",
-            ModelKind::Layout => "layout",
-            ModelKind::Formula => "formula",
-            ModelKind::FormulaTokenizer => "formula_tokenizer",
-        }
-    }
-}
-
 /// Catalog entry for a single model file.
 ///
 /// The app does not download models itself. For `GitHubRelease` / `ModelScope`
@@ -125,9 +111,19 @@ pub struct OcrProfile {
     pub rec: String,
     pub dict: String,
     #[serde(default)]
+    pub text_direction: Option<TextDirection>,
+    #[serde(default)]
     pub text_detection: Option<TextDetectionTuning>,
     #[serde(default)]
     pub text_recognition: Option<TextRecognitionTuning>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TextDirection {
+    Ltr,
+    Rtl,
+    Auto,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -393,6 +389,7 @@ fn append_custom_ocr_profile(cfg: &mut ModelConfig, paths: CustomOcrPaths) {
         det: CUSTOM_DET_KEY.into(),
         rec: CUSTOM_REC_KEY.into(),
         dict: CUSTOM_DICT_KEY.into(),
+        text_direction: None,
         text_detection: None,
         text_recognition: None,
     });
@@ -473,46 +470,6 @@ pub fn resolve(app: &AppHandle, key: &str) -> Option<PathBuf> {
         ModelSource::Local => None,
         _ => Some(PathBuf::from(d.filename)),
     }
-}
-
-fn present(app: &AppHandle, d: &ModelDef) -> bool {
-    if candidate_paths(app, d).into_iter().any(|p| p.is_file()) {
-        return true;
-    }
-    match d.source {
-        ModelSource::Local => false,
-        ModelSource::GitHubRelease | ModelSource::ModelScope => {
-            oar_ocr::download::cache_dir().join(&d.filename).is_file()
-        }
-    }
-}
-
-#[derive(Serialize)]
-pub struct ModelStatus {
-    pub key: String,
-    pub filename: String,
-    pub title: String,
-    pub size_label: String,
-    pub bundled: bool,
-    pub present: bool,
-    pub kind: String,
-}
-
-pub fn status_all(app: &AppHandle) -> Result<Vec<ModelStatus>, String> {
-    let cfg = config(app)?;
-    Ok(cfg
-        .models
-        .iter()
-        .map(|d| ModelStatus {
-            key: d.key.clone(),
-            filename: d.filename.clone(),
-            title: d.title.clone(),
-            size_label: d.size_label.clone(),
-            bundled: d.bundled,
-            present: present(app, d),
-            kind: d.kind.as_str().into(),
-        })
-        .collect())
 }
 
 pub fn options(app: &AppHandle) -> Result<ModelOptions, String> {

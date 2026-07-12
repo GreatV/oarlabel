@@ -10,7 +10,6 @@ import type {
   InferenceTuning,
   Mode,
   ModelOptions,
-  ModelStatus,
   Point,
   Theme,
   Tool,
@@ -81,7 +80,6 @@ export interface AnnotationSlice {
 }
 
 export interface SettingsSlice {
-  models: ModelStatus[];
   modelOptions: ModelOptions | null;
   deviceOptions: DeviceOption[];
   view: ViewOptions;
@@ -111,14 +109,20 @@ export interface SettingsSlice {
 
 export interface BatchSlice {
   batchRunning: boolean;
+  batchPhase: "infer" | null;
   batchTotal: number;
   batchDone: number;
+  batchFailures: string[];
   batchCancelRequested: boolean;
   batchActivePath: string | null;
   batchPendingPaths: Record<string, true>;
   preannotateCurrent: () => Promise<void>;
-  preannotateAll: () => Promise<void>;
+  preannotateAll: (options?: {
+    skipAnnotated?: boolean;
+    replacementConfirmed?: boolean;
+  }) => Promise<void>;
   requestBatchCancel: () => void;
+  clearBatchFailures: () => void;
   save: () => Promise<boolean>;
   saveAndNext: () => Promise<void>;
 }
@@ -181,7 +185,6 @@ export interface StoreRuntime {
     params?: PreannParams,
   ) => Promise<{ annos: Annotation[]; skipped: number }>;
   applyPreannotation: (path: string, annotations: Annotation[]) => void;
-  annotationCountForPath: (path: string) => Promise<number>;
   saveImageAfterBatchPreannotation: (path: string) => Promise<void>;
   saveCurrentImage: (status?: ImageStatus) => Promise<boolean>;
   annotationFileForExport: (path: string) => Promise<ParsedAnnotationFile>;

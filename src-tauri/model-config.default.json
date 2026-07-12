@@ -909,6 +909,7 @@
       "det": "det",
       "rec": "ppocrv5_arabic_rec",
       "dict": "ppocrv5_arabic_dict",
+      "text_direction": "auto",
       "text_detection": {
         "score_threshold": 0.3,
         "box_threshold": 0.6,

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { subscribeWithSelector } from "zustand/middleware";
 import { createAnnotationSlice } from "@/store/annotationSlice";
 import { createBatchSlice } from "@/store/batchSlice";
 import { createExportSlice } from "@/store/exportSlice";
@@ -21,13 +22,15 @@ export type { AppState } from "@/store/types";
  * StoreRuntime contains the deliberately small set of cross-slice operations
  * (loading, save policy, mutation/history and inference application).
  */
-export const useStore = create<AppState>((set, get, api) => {
-  const runtime = createStoreRuntime(set, get);
-  return {
-    ...createWorkspaceSlice(runtime)(set, get, api),
-    ...createAnnotationSlice(runtime)(set, get, api),
-    ...createSettingsSlice(set, get, api),
-    ...createBatchSlice(runtime)(set, get, api),
-    ...createExportSlice(runtime)(set, get, api),
-  };
-});
+export const useStore = create<AppState>()(
+  subscribeWithSelector((set, get, api) => {
+    const runtime = createStoreRuntime(set, get);
+    return {
+      ...createWorkspaceSlice(runtime)(set, get, api),
+      ...createAnnotationSlice(runtime)(set, get, api),
+      ...createSettingsSlice(set, get, api),
+      ...createBatchSlice(runtime)(set, get, api),
+      ...createExportSlice(runtime)(set, get, api),
+    };
+  }),
+);

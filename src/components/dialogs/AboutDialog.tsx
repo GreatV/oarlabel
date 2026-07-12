@@ -25,9 +25,7 @@ export function AboutDialog({ open, onOpenChange }: AboutDialogProps) {
       <DialogContent className="max-w-sm">
         <DialogHeader>
           <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-[hsl(var(--brand-start))] to-[hsl(var(--brand-end))]">
-              <div className="h-3 w-3 rounded-full bg-white/90" />
-            </div>
+            <img src="/icon.svg" alt="" className="h-8 w-8" aria-hidden="true" />
             <DialogTitle className="text-lg">oarlabel</DialogTitle>
           </div>
           <DialogDescription>{t(locale, "about.desc")}</DialogDescription>

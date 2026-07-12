@@ -21,6 +21,7 @@ use oar_ocr::processors::layout_sorting::{sort_layout_enhanced, SortableElement}
 use oar_ocr::utils::load_image;
 use serde::Serialize;
 use tauri::AppHandle;
+use unicode_bidi::BidiInfo;
 
 use crate::{geometry, models};
 
@@ -77,6 +78,24 @@ mod cancellation_tests {
     }
 }
 
+#[cfg(test)]
+mod rtl_text_tests {
+    use super::reorder_bidi_text;
+
+    #[test]
+    fn converts_visual_rtl_text_to_logical_order() {
+        assert_eq!(
+            reorder_bidi_text("\u{0627}\u{0628}\u{062d}\u{0631}\u{0645}"),
+            "\u{0645}\u{0631}\u{062d}\u{0628}\u{0627}"
+        );
+    }
+
+    #[test]
+    fn leaves_ltr_text_unchanged() {
+        assert_eq!(reorder_bidi_text("hello 123"), "hello 123");
+    }
+}
+
 fn resolve_model_path(app: &AppHandle, key: &str, role: &str) -> Result<PathBuf, String> {
     let def = models::def(app, key)?;
     models::resolve(app, key).ok_or_else(|| match def.source {
@@ -113,6 +132,47 @@ fn apply_text_recognition_tuning(
         if let Some(v) = t.score_threshold {
             cfg.score_threshold = v;
         }
+    }
+}
+
+fn should_postprocess_rtl(profile: &models::OcrProfile) -> bool {
+    matches!(
+        profile.text_direction,
+        Some(models::TextDirection::Rtl | models::TextDirection::Auto)
+    )
+}
+
+fn reorder_bidi_line(line: &str) -> String {
+    let bidi_info = BidiInfo::new(line, None);
+    let Some(para) = bidi_info.paragraphs.first() else {
+        return line.to_string();
+    };
+
+    bidi_info
+        .reorder_line(para, para.range.clone())
+        .into_owned()
+}
+
+fn reorder_bidi_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+
+    for segment in text.split_inclusive('\n') {
+        if let Some(line) = segment.strip_suffix('\n') {
+            out.push_str(&reorder_bidi_line(line));
+            out.push('\n');
+        } else {
+            out.push_str(&reorder_bidi_line(segment));
+        }
+    }
+
+    out
+}
+
+fn postprocess_text_for_profile(profile: &models::OcrProfile, text: String) -> String {
+    if should_postprocess_rtl(profile) {
+        reorder_bidi_text(&text)
+    } else {
+        text
     }
 }
 
@@ -466,6 +526,7 @@ pub fn recognize_text_regions(
     tuning: Option<models::InferenceTuning>,
 ) -> Result<TextRecognitionRegionResult, String> {
     let requested = regions.len();
+    let prof = models::profile(app, profile_key)?;
     tracing::info!(
         image = %image_path,
         profile = %profile_key,
@@ -542,6 +603,7 @@ pub fn recognize_text_regions(
             skipped += 1;
             continue;
         };
+        let text = postprocess_text_for_profile(&prof, text);
         out.push(RecognizedTextRegion {
             id,
             text,
@@ -641,6 +703,7 @@ pub fn run_ocr(
     tuning: Option<models::InferenceTuning>,
 ) -> Result<PreannResult, String> {
     check_preannotation_cancelled()?;
+    let prof = models::profile(app, profile_key)?;
     let ocr = get_or_build_ocr(app, profile_key, device, tuning)?;
     check_preannotation_cancelled()?;
     let img =
@@ -663,9 +726,12 @@ pub fn run_ocr(
             if points.is_empty() {
                 continue;
             }
+            let text = region
+                .text
+                .map(|t| postprocess_text_for_profile(&prof, t.to_string()));
             out.push(PreannBox {
                 points,
-                text: region.text.map(|t| t.to_string()),
+                text,
                 label: None,
                 score: region.confidence,
             });

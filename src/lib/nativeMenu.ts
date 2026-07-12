@@ -52,8 +52,6 @@ export function nativeMenuEnabledState({
     "oar:actual": hasImage,
     "oar:fit-window": hasImage,
     "oar:fit-width": hasImage,
-    "oar:preannotate-current": hasImage && filesystemIdle,
-    "oar:preannotate-all": hasImages && filesystemIdle,
   };
   for (let index = 0; index < NATIVE_RECENT_LIMIT; index += 1) {
     enabled[`oar:recent:${index}`] = index < recentCount && filesystemIdle;

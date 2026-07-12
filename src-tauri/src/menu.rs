@@ -68,15 +68,11 @@ pub struct ViewState {
     #[serde(default)]
     pub view: HashMap<String, bool>,
     #[serde(default)]
-    pub theme: Option<String>,
-    #[serde(default)]
     pub ocr_model: Option<String>,
     #[serde(default)]
     pub layout_model: Option<String>,
     #[serde(default)]
     pub formula_model: Option<String>,
-    #[serde(default)]
-    pub device: Option<String>,
     #[serde(default)]
     pub auto_save: bool,
     #[serde(default)]
@@ -95,11 +91,6 @@ impl ViewState {
     }
 
     #[cfg(target_os = "macos")]
-    fn theme_checked(&self, theme: &str) -> bool {
-        self.theme.as_deref().unwrap_or("system") == theme
-    }
-
-    #[cfg(target_os = "macos")]
     fn model_checked(&self, kind: &str, key: &str) -> bool {
         match kind {
             "ocr" => self.ocr_model.as_deref() == Some(key),
@@ -107,11 +98,6 @@ impl ViewState {
             "formula" => self.formula_model.as_deref() == Some(key),
             _ => false,
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    fn device_checked(&self, device: &str) -> bool {
-        self.device.as_deref().unwrap_or("cpu") == device
     }
 }
 
@@ -449,38 +435,6 @@ fn build(app: &AppHandle, locale: &str, state: &ViewState) -> tauri::Result<Menu
                 ],
             )?,
             &PredefinedMenuItem::separator(app)?,
-            &Submenu::with_items(
-                app,
-                tr(locale, "menu.view.theme"),
-                true,
-                &[
-                    &CheckMenuItem::with_id(
-                        app,
-                        "oar:theme:light",
-                        tr(locale, "theme.light"),
-                        true,
-                        state.theme_checked("light"),
-                        None::<&str>,
-                    )?,
-                    &CheckMenuItem::with_id(
-                        app,
-                        "oar:theme:dark",
-                        tr(locale, "theme.dark"),
-                        true,
-                        state.theme_checked("dark"),
-                        None::<&str>,
-                    )?,
-                    &CheckMenuItem::with_id(
-                        app,
-                        "oar:theme:system",
-                        tr(locale, "theme.system"),
-                        true,
-                        state.theme_checked("system"),
-                        None::<&str>,
-                    )?,
-                ],
-            )?,
-            &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::fullscreen(app, Some(&fullscreen_label))?,
             &MenuItem::with_id(
                 app,
@@ -578,64 +532,11 @@ fn build_model_menu(app: &AppHandle, locale: &str, state: &ViewState) -> Option<
         &opts.formula_profiles,
         state,
     )?;
-    let device_items: Vec<CheckMenuItem<Wry>> = crate::devices::available_devices()
-        .into_iter()
-        .filter_map(|d| {
-            CheckMenuItem::with_id(
-                app,
-                format!("oar:device:{}", d.key),
-                d.label,
-                true,
-                state.device_checked(d.key),
-                None::<&str>,
-            )
-            .ok()
-        })
-        .collect();
-    let device_refs: Vec<&dyn IsMenuItem<Wry>> = device_items
-        .iter()
-        .map(|i| i as &dyn IsMenuItem<Wry>)
-        .collect();
-    let device =
-        Submenu::with_items(app, tr(locale, "menu.model.device"), true, &device_refs).ok()?;
-
     Submenu::with_items(
         app,
         tr(locale, "menu.model"),
         true,
-        &[
-            &ocr,
-            &layout,
-            &formula,
-            &PredefinedMenuItem::separator(app).ok()?,
-            &device,
-            &PredefinedMenuItem::separator(app).ok()?,
-            &MenuItem::with_id(
-                app,
-                "oar:preannotate-current",
-                tr(locale, "menu.model.preannotateCurrent"),
-                true,
-                None::<&str>,
-            )
-            .ok()?,
-            &MenuItem::with_id(
-                app,
-                "oar:preannotate-all",
-                tr(locale, "menu.model.preannotateAll"),
-                true,
-                None::<&str>,
-            )
-            .ok()?,
-            &PredefinedMenuItem::separator(app).ok()?,
-            &MenuItem::with_id(
-                app,
-                "oar:model-settings",
-                tr(locale, "menu.model.settings"),
-                true,
-                None::<&str>,
-            )
-            .ok()?,
-        ],
+        &[&ocr, &layout, &formula],
     )
     .ok()
 }
@@ -713,14 +614,3 @@ fn find_check_item(items: Vec<MenuItemKind<Wry>>, item_id: &str) -> Option<Check
     }
     None
 }
-
-#[cfg(target_os = "macos")]
-pub fn set_theme_checked(app: &AppHandle, selected: &str) {
-    for theme in ["light", "dark", "system"] {
-        set_checked(app, &format!("oar:theme:{theme}"), theme == selected);
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-#[allow(dead_code)]
-pub fn set_theme_checked(_app: &AppHandle, _selected: &str) {}

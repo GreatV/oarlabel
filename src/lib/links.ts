@@ -7,7 +7,7 @@ const REPO = "https://github.com/GreatV/oarlabel";
 export const LINKS = {
   repo: REPO,
   docs: `${REPO}#readme`,
-  faq: `${REPO}#readme`,
+  faq: `${REPO}/blob/main/docs/FAQ.md`,
   issues: `${REPO}/issues`,
   releases: `${REPO}/releases`,
 } as const;

@@ -111,7 +111,6 @@ function storedString(key: string, fallback: string): string {
 }
 
 export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> = (set, get) => ({
-  models: [],
   modelOptions: null,
   deviceOptions: [],
   view: normalizeViewOptions(loadJson<unknown>(STORAGE_KEYS.view, DEFAULT_VIEW)),
@@ -183,12 +182,11 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
   },
   refreshModels: async () => {
     try {
-      const [models, modelOptions, deviceOptions] = await Promise.all([
-        api.modelStatus(),
+      const [modelOptions, deviceOptions] = await Promise.all([
         api.modelOptions(),
         api.availableDevices(),
       ]);
-      const next: Partial<AppState> = { models, modelOptions, deviceOptions };
+      const next: Partial<AppState> = { modelOptions, deviceOptions };
       const state = get();
       if (!modelOptions.ocr_profiles.some((option) => option.key === state.ocrModel)) {
         next.ocrModel = modelOptions.ocr_profiles[0]?.key ?? state.ocrModel;
