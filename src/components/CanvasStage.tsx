@@ -20,7 +20,7 @@ import {
 import { useShallow } from "zustand/react/shallow";
 import { fileSrc } from "@/lib/tauri";
 import { t, tt } from "@/i18n";
-import { isInteractiveControlTarget, shouldIgnoreGlobalShortcut } from "@/lib/keyboard";
+import { shouldIgnoreGlobalShortcut } from "@/lib/keyboard";
 import { colorFor, usePalette, withAlpha } from "@/lib/palette";
 import { shortcut } from "@/lib/platform";
 import { clampZoom } from "@/lib/constants";
@@ -43,31 +43,69 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 
+const IMAGE_CACHE_LIMIT = 4;
+const imageCache = new Map<string, Promise<HTMLImageElement>>();
+
+function loadCachedImage(src: string): Promise<HTMLImageElement> {
+  const cached = imageCache.get(src);
+  if (cached) {
+    imageCache.delete(src);
+    imageCache.set(src, cached);
+    return cached;
+  }
+
+  const promise = new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new window.Image();
+    image.onload = () => {
+      void image.decode().catch(() => undefined).finally(() => resolve(image));
+    };
+    image.onerror = () => reject(new Error(`Failed to load image: ${src}`));
+    image.src = src;
+  });
+  imageCache.set(src, promise);
+  while (imageCache.size > IMAGE_CACHE_LIMIT) {
+    const oldest = imageCache.keys().next().value;
+    if (oldest) imageCache.delete(oldest);
+  }
+  void promise.catch(() => {
+    if (imageCache.get(src) === promise) imageCache.delete(src);
+  });
+  return promise;
+}
+
 function useImage(src?: string) {
-  const [img, setImg] = useState<HTMLImageElement | null>(null);
+  const [loaded, setLoaded] = useState<{
+    src: string;
+    image: HTMLImageElement;
+  } | null>(null);
   useEffect(() => {
     if (!src) {
-      setImg(null);
+      setLoaded(null);
       return;
     }
-    const im = new window.Image();
     let cancelled = false;
-    im.onload = () => !cancelled && setImg(im);
-    im.onerror = () => !cancelled && setImg(null);
-    im.src = src;
+    void loadCachedImage(src)
+      .then((image) => {
+        if (!cancelled) setLoaded({ src, image });
+      })
+      .catch(() => {
+        if (!cancelled) setLoaded(null);
+      });
     return () => {
       cancelled = true;
     };
   }, [src]);
-  return img;
+  return loaded && loaded.src === src ? loaded.image : null;
 }
 
 export function CanvasStage() {
   const locale = useStore((s) => s.locale);
   const minBoxSize = useStore((s) => s.minBoxSize);
   const img = useStore((s) => s.currentImage());
+  const nextImagePath = useStore((s) => s.images[s.currentIndex + 1]?.path);
   const zoom = useStore((s) => s.zoom);
   const tool = useStore((s) => s.tool);
+  const mode = useStore((s) => s.mode);
   const fitNonce = useStore((s) => s.fitNonce);
   const view = useStore(useShallow((s) => s.view));
   const selectedIds = useStore((s) => s.selectedIds);
@@ -81,17 +119,25 @@ export function CanvasStage() {
   const pasteAt = useStore((s) => s.pasteAt);
   const setAnnotationHidden = useStore((s) => s.setAnnotationHidden);
   const recognizeSelectedText = useStore((s) => s.recognizeSelectedText);
+  const recognizeAllTextBoxes = useStore((s) => s.recognizeAllTextBoxes);
+  const batchRunning = useStore((s) => s.batchRunning);
   const clipboardCount = useStore((s) => s.clipboard.length);
   const busy = useStore((s) => {
     const path = s.currentImage()?.path;
     return s.busy || (!!path && s.batchPendingPaths[path] === true);
   });
   const image = useImage(img ? fileSrc(img.path) : undefined);
+
+  useEffect(() => {
+    // Let the current image finish decoding before using bandwidth/CPU to
+    // warm the next one in the navigation sequence.
+    if (!image || !nextImagePath) return;
+    void loadCachedImage(fileSrc(nextImagePath)).catch(() => undefined);
+  }, [image, nextImagePath]);
   // Resolve palette colors (re-resolves on light/dark theme switch) so Konva,
   // which draws to <canvas> and can't read CSS var(--…), gets concrete colors.
   usePalette();
   const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const [spacePanning, setSpacePanning] = useState(false);
   const [contextMenu, setContextMenu] = useState<{
     point: Point | null;
     annotationId: string | null;
@@ -102,7 +148,10 @@ export function CanvasStage() {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const activePathRef = useRef<string | null>(null);
   const prevSizeRef = useRef({ w: 0, h: 0 });
-  const autoFitModeRef = useRef<FitMode | null>("window");
+  const autoFitModeRef = useRef<FitMode | null>(
+    useStore.getState().fitMode ?? "window",
+  );
+  const handledFitNonceRef = useRef(fitNonce);
   // Track the origin of the last zoom change so the re-anchor effect only runs
   // for keyboard / external zoom edits, not for wheel or fit (which set their
   // own pan). prevZoomRef holds the zoom the pan was computed against.
@@ -121,7 +170,7 @@ export function CanvasStage() {
   const dragPtsRef = useRef<Point[] | null>(null);
   const polygonCloseReady =
     !!draftPoly &&
-    draftPoly.length >= 3 &&
+    draftPoly.length > 3 &&
     !!cursor &&
     Math.hypot(draftPoly[0][0] - cursor[0], draftPoly[0][1] - cursor[1]) * zoom <= 22;
   const contextAnnotation = contextMenu.annotationId
@@ -213,16 +262,27 @@ export function CanvasStage() {
     if (!image || !size.w || !size.h || !img) return;
     if (activePathRef.current !== img.path) {
       activePathRef.current = img.path;
-      autoFitModeRef.current = "window";
+      // Preserve an explicit fit mode across images. A manual wheel zoom
+      // disables auto-fit only until the next image is displayed.
+      if (!autoFitModeRef.current) autoFitModeRef.current = "window";
     }
     if (autoFitModeRef.current) applyFit(autoFitModeRef.current);
   }, [applyFit, image, img, size.h, size.w]);
 
   // Respond to 视图 menu fit requests (window / width / actual).
   useEffect(() => {
-    if (fitNonce === 0 || !image || !size.w || !size.h) return;
+    if (
+      fitNonce === 0 ||
+      fitNonce === handledFitNonceRef.current ||
+      !image ||
+      !size.w ||
+      !size.h
+    ) {
+      return;
+    }
     const mode = useStore.getState().fitMode;
     if (!mode) return;
+    handledFitNonceRef.current = fitNonce;
     autoFitModeRef.current = mode;
     applyFit(mode);
   }, [applyFit, fitNonce, image, size.h, size.w]);
@@ -340,7 +400,7 @@ export function CanvasStage() {
   }, [zoom]);
 
   const handleMouseDown = (e: Konva.KonvaEventObject<MouseEvent>) => {
-    if (!image || busy || spacePanning) return;
+    if (!image || busy) return;
     const stage = e.target.getStage();
     const pointer = stage?.getPointerPosition();
     if (!pointer) return;
@@ -395,19 +455,15 @@ export function CanvasStage() {
   };
 
   const handleStageClick = (e: Konva.KonvaEventObject<MouseEvent>) => {
-    if (busy || spacePanning) return;
+    if (busy) return;
     if (tool === "polygon") {
       const stage = e.target.getStage();
       const pointer = stage?.getPointerPosition();
       if (!pointer) return;
-      if (e.evt.detail > 1) {
-        if (draftPoly && draftPoly.length >= 3) finishPolygon();
-        return;
-      }
       const p = toImage(pointer.x, pointer.y);
       // Close if the click lands near the first point. Use screen distance so
       // the target remains easy to hit regardless of zoom level.
-      if (draftPoly && draftPoly.length >= 3) {
+      if (draftPoly && draftPoly.length > 3) {
         const f = draftPoly[0];
         if (Math.hypot(f[0] - p[0], f[1] - p[1]) * zoom <= 22) {
           addAnnotation(draftPoly, undefined, "polygon");
@@ -422,20 +478,11 @@ export function CanvasStage() {
     }
   };
 
-  const finishPolygon = () => {
-    if (draftPoly && draftPoly.length >= 3) {
-      addAnnotation(draftPoly, undefined, "polygon");
-    }
-    setDraftPoly(null);
-    setCursor(null);
-  };
-
-  // Keyboard: finish/cancel polygon, delete selection.
+  // Keyboard: cancel polygon, remove its last point, or delete selection.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (shouldIgnoreGlobalShortcut(e.target)) return;
-      if (e.key === "Enter" && !e.metaKey && !e.ctrlKey && draftPoly) finishPolygon();
-      else if (e.key === "Escape") {
+      if (e.key === "Escape") {
         setDraftPoly(null);
         setDraftRect(null);
         setCursor(null);
@@ -458,34 +505,11 @@ export function CanvasStage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draftPoly, selectedIds.length]);
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.code !== "Space" ||
-        shouldIgnoreGlobalShortcut(event.target) ||
-        isInteractiveControlTarget(event.target)
-      ) {
-        return;
-      }
-      event.preventDefault();
-      setSpacePanning(true);
-    };
-    const onKeyUp = (event: KeyboardEvent) => {
-      if (event.code === "Space") setSpacePanning(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
-    };
-  }, []);
-
   const stroke = 2 / zoom;
   const tagFont = 12 / zoom;
   const tagW = 18 / zoom;
   const tagH = 16 / zoom;
-  const draggable = (tool === "select" || spacePanning) && !busy;
+  const draggable = tool === "select" && !busy;
 
   /** Render the edit handles for a selected annotation. Rect annotations get
    *  8 resize handles (4 corners + 4 edge midpoints) that keep the shape
@@ -704,11 +728,7 @@ export function CanvasStage() {
           ref={containerRef}
           className="relative h-full w-full overflow-hidden bg-canvas"
           style={{
-            cursor: spacePanning
-              ? "grab"
-              : tool === "rect" || tool === "polygon"
-                ? "crosshair"
-                : "default",
+            cursor: tool === "rect" || tool === "polygon" ? "crosshair" : "default",
           }}
         >
       {!img && (
@@ -964,6 +984,13 @@ export function CanvasStage() {
         >
           <ScanText className="h-4 w-4 text-muted-foreground" />
           {t(locale, "canvas.context.recognize")}
+        </ContextMenuItem>
+        <ContextMenuItem
+          disabled={!annos.length || busy || batchRunning || mode === "layout"}
+          onClick={() => void recognizeAllTextBoxes()}
+        >
+          <ScanText className="h-4 w-4 text-muted-foreground" />
+          {t(locale, "results.recognizeAllText")}
         </ContextMenuItem>
         <ContextMenuItem
           disabled={busy || !contextAnnotation}

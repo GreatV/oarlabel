@@ -8,6 +8,7 @@
 
 import { useEffect } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
+import { shallow } from "zustand/shallow";
 import { t, type MessageKey } from "@/i18n";
 import { isMac } from "@/lib/platform";
 import {
@@ -16,15 +17,18 @@ import {
   NATIVE_RECENT_LIMIT,
 } from "@/lib/nativeMenu";
 import { api, pickImages } from "@/lib/tauri";
-import { useStore } from "@/store";
-import type { SettingsSection } from "@/components/dialogs/SettingsDialog";
-import { DEFAULT_DEVICE_OPTIONS, VIEW_KEYS, type Device, type ModelOption, type Theme, type ViewOptions } from "@/types";
+import { useStore, type AppState } from "@/store";
+import {
+  VIEW_KEYS,
+  type ModelOption,
+  type ViewOptions,
+} from "@/types";
 
 /** Dialogs the native menu can open. Provided by App.tsx. */
 export interface NativeMenuOpeners {
   openFolder: () => Promise<void>;
   openExport: () => void;
-  openSettings: (section?: SettingsSection) => void;
+  openSettings: () => void;
   openShortcuts: () => void;
   openAbout: () => void;
 }
@@ -32,13 +36,37 @@ export interface NativeMenuOpeners {
 interface NativeMenuPayload {
   locale: string;
   view: ViewOptions;
-  theme: string;
   ocrModel: string;
   layoutModel: string;
   formulaModel: string;
-  device: string;
   autoSave: boolean;
   recentDirs: string[];
+}
+
+function nativeMenuSyncState(state: AppState) {
+  const image = state.images[state.currentIndex];
+  const path = image?.path;
+  const nextPath = state.images[state.currentIndex + 1]?.path;
+  return {
+    locale: state.locale,
+    view: state.view,
+    ocrModel: state.ocrModel,
+    layoutModel: state.layoutModel,
+    formulaModel: state.formulaModel,
+    autoSave: state.autoSave,
+    recentDirs: state.recentDirs,
+    hasImage: !!image,
+    hasImages: state.images.length > 0,
+    hasSelection: state.selectedIds.length > 0,
+    busy: state.busy,
+    batchRunning: state.batchRunning,
+    currentLocked: state.busy || (!!path && state.batchPendingPaths[path] === true),
+    nextLocked: !nextPath || state.batchPendingPaths[nextPath] === true,
+    hasUndo: !!path && (state.past[path]?.length ?? 0) > 0,
+    hasRedo: !!path && (state.future[path]?.length ?? 0) > 0,
+    hasClipboard: state.clipboard.length > 0,
+    recentCount: state.recentDirs.length,
+  };
 }
 
 export function useNativeMenu(openers: NativeMenuOpeners): void {
@@ -47,43 +75,42 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
 
     // Keep the native menu in sync with React state. Two channels:
     //  - rebuild (locale change, model-catalog change): Rust rebuilds the whole
-    //    menu; we send {locale, view, theme} so the View checkbox/theme items are CREATED
-    //    with their real checked value (no post-rebuild fixup needed).
-    //  - live toggle (toggleView / resetLayout / theme): per-key
+    //    menu; we send {locale, view} so View checkbox items are created with
+    //    their real checked value (no post-rebuild fixup needed).
+    //  - live toggle (toggleView / resetLayout): per-key
     //    `oar:set-menu-state` updates existing checked items without a full rebuild.
     let lastLocale = useStore.getState().locale;
     let lastView = { ...useStore.getState().view };
-    let lastTheme = useStore.getState().theme;
     let lastOcrModel = useStore.getState().ocrModel;
     let lastLayoutModel = useStore.getState().layoutModel;
     let lastFormulaModel = useStore.getState().formulaModel;
-    let lastDevice = useStore.getState().device;
     let lastAutoSave = useStore.getState().autoSave;
     let lastRecentDirs = [...useStore.getState().recentDirs];
     let lastEnabled: Record<string, boolean> = {};
 
-    const enabledState = (): Record<string, boolean> => {
-      const state = useStore.getState();
-      const image = state.currentImage();
-      const path = image?.path;
-      const nextPath = state.images[state.currentIndex + 1]?.path;
+    const enabledState = (
+      state = nativeMenuSyncState(useStore.getState()),
+    ): Record<string, boolean> => {
       return nativeMenuEnabledState({
-        hasImage: !!image,
-        hasImages: state.images.length > 0,
-        hasSelection: state.selectedIds.length > 0,
+        hasImage: state.hasImage,
+        hasImages: state.hasImages,
+        hasSelection: state.hasSelection,
         busy: state.busy,
         batchRunning: state.batchRunning,
-        currentLocked: state.busy || (!!path && state.batchPendingPaths[path] === true),
-        nextLocked: !nextPath || state.batchPendingPaths[nextPath] === true,
-        hasUndo: !!path && (state.past[path]?.length ?? 0) > 0,
-        hasRedo: !!path && (state.future[path]?.length ?? 0) > 0,
-        hasClipboard: state.clipboard.length > 0,
-        recentCount: state.recentDirs.length,
+        currentLocked: state.currentLocked,
+        nextLocked: state.nextLocked,
+        hasUndo: state.hasUndo,
+        hasRedo: state.hasRedo,
+        hasClipboard: state.hasClipboard,
+        recentCount: state.recentCount,
       });
     };
 
-    const syncEnabled = (force = false) => {
-      const next = enabledState();
+    const syncEnabled = (
+      force = false,
+      state = nativeMenuSyncState(useStore.getState()),
+    ) => {
+      const next = enabledState(state);
       for (const payload of changedMenuStatePayloads(lastEnabled, next, force)) {
         void emit("oar:set-menu-enabled", payload);
       }
@@ -97,22 +124,18 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
       const {
         locale,
         view,
-        theme,
         ocrModel,
         layoutModel,
         formulaModel,
-        device,
         autoSave,
         recentDirs,
       } = useStore.getState();
       return {
         locale,
         view,
-        theme,
         ocrModel,
         layoutModel,
         formulaModel,
-        device,
         autoSave,
         recentDirs,
       };
@@ -121,11 +144,9 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
       const state = useStore.getState();
       lastLocale = state.locale;
       lastView = { ...state.view };
-      lastTheme = state.theme;
       lastOcrModel = state.ocrModel;
       lastLayoutModel = state.layoutModel;
       lastFormulaModel = state.formulaModel;
-      lastDevice = state.device;
       lastAutoSave = state.autoSave;
       lastRecentDirs = [...state.recentDirs];
       lastEnabled = {};
@@ -135,19 +156,17 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
     // Initial build in the real locale, with the real view state seeded in.
     rebuildNow("oar:set-locale");
 
-    const sync = () => {
+    const sync = (state: ReturnType<typeof nativeMenuSyncState>) => {
       const {
         locale,
         view,
-        theme,
         ocrModel,
         layoutModel,
         formulaModel,
-        device,
         autoSave,
-        modelOptions,
         recentDirs,
-      } = useStore.getState();
+      } = state;
+      const modelOptions = useStore.getState().modelOptions;
       // Live per-key sync for toggleView / resetLayout. Emit each changed key
       // (a full reset flips all 7) so the native items track React state
       // without a full menu rebuild.
@@ -156,27 +175,6 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
         lastView = { ...view };
         for (const key of VIEW_KEYS) {
           void emit("oar:set-menu-state", { id: `oar:view:${key}`, value: view[key] });
-        }
-      }
-      if (theme !== lastTheme) {
-        lastTheme = theme;
-        for (const key of ["light", "dark", "system"]) {
-          void emit("oar:set-menu-state", {
-            id: `oar:theme:${key}`,
-            value: theme === key,
-          });
-        }
-      }
-      if (device !== lastDevice) {
-        lastDevice = device;
-        const deviceOptions = useStore.getState().deviceOptions.length
-          ? useStore.getState().deviceOptions
-          : DEFAULT_DEVICE_OPTIONS;
-        for (const option of deviceOptions) {
-          void emit("oar:set-menu-state", {
-            id: `oar:device:${option.key}`,
-            value: device === option.key,
-          });
         }
       }
       if (autoSave !== lastAutoSave) {
@@ -219,9 +217,11 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
       ) {
         rebuildNow("oar:rebuild-menu");
       }
-      syncEnabled();
+      syncEnabled(false, state);
     };
-    const unsubStore = useStore.subscribe(sync);
+    const unsubStore = useStore.subscribe(nativeMenuSyncState, sync, {
+      equalityFn: shallow,
+    });
 
     // File-menu items need a picker dialog before hitting the store. Wrapped
     // in try/catch so a picker/IPC failure surfaces a status message instead
@@ -269,10 +269,7 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
       "oar:fit-window": () => useStore.getState().requestFit("window"),
       "oar:fit-width": () => useStore.getState().requestFit("width"),
       "oar:reset-layout": () => useStore.getState().resetLayout(),
-      "oar:preannotate-current": () => void useStore.getState().preannotateCurrent(),
-      "oar:preannotate-all": () => void useStore.getState().preannotateAll(),
-      "oar:settings": () => openers.openSettings("general"),
-      "oar:model-settings": () => openers.openSettings("models"),
+      "oar:settings": openers.openSettings,
       "oar:shortcuts": openers.openShortcuts,
       "oar:about": openers.openAbout,
     };
@@ -299,14 +296,6 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
         useStore.getState().toggleView(key);
         return;
       }
-      if (id.startsWith("oar:device:")) {
-        useStore.getState().setDevice(id.slice("oar:device:".length) as Device);
-        return;
-      }
-      if (id.startsWith("oar:theme:")) {
-        useStore.getState().setTheme(id.slice("oar:theme:".length) as Theme);
-        return;
-      }
       if (id === "oar:auto-save") {
         const s = useStore.getState();
         s.setAutoSave(!s.autoSave);
@@ -328,8 +317,6 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
     // click works even before modelOptions has loaded and survives rebuilds.
     const ids = new Set<string>(Object.keys(routes));
     for (const k of VIEW_KEYS) ids.add(`oar:view:${k}`);
-    for (const d of ["cpu", "cuda"]) ids.add(`oar:device:${d}`);
-    for (const theme of ["light", "dark", "system"]) ids.add(`oar:theme:${theme}`);
     ids.add("oar:auto-save");
     for (let index = 0; index < NATIVE_RECENT_LIMIT; index += 1) {
       ids.add(`oar:recent:${index}`);
@@ -355,14 +342,14 @@ export function useNativeMenu(openers: NativeMenuOpeners): void {
     // When the model catalog changes (e.g. saving a custom config in Settings),
     // rebuild the native menu so the new options appear. The rebuild payload
     // carries the current view state so checkbox items stay correct.
-    let prevModelOpts = useStore.getState().modelOptions;
-    const unsubOpts = useStore.subscribe(() => {
-      const next = useStore.getState().modelOptions;
-      if (next !== prevModelOpts) {
-        prevModelOpts = next;
+    const unsubOpts = useStore.subscribe(
+      (state) => state.modelOptions,
+      (next, previous) => {
+        if (next !== previous) {
         rebuildNow("oar:rebuild-menu");
-      }
-    });
+        }
+      },
+    );
 
     return () => {
       unsubStore();

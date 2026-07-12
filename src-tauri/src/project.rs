@@ -19,7 +19,7 @@ pub struct ImageItem {
 
 pub const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "bmp", "webp", "gif", "tif", "tiff"];
 
-fn is_image(path: &Path) -> bool {
+pub(crate) fn is_image(path: &Path) -> bool {
     path.extension()
         .and_then(|s| s.to_str())
         .map(|e| IMAGE_EXTS.contains(&e.to_lowercase().as_str()))

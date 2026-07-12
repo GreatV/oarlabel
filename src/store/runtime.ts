@@ -32,9 +32,10 @@ import type { AppState, PreannParams, StoreRuntime } from "@/store/types";
 import { saveJson } from "@/lib/storage";
 
 const MAX_HISTORY = 50;
-const CLEAN_IMAGE_CACHE_LIMIT = 12;
+const CLEAN_IMAGE_CACHE_LIMIT = 48;
 const LOAD_IPC_CONCURRENCY = 8;
-const DIMENSION_UPDATE_BATCH_SIZE = 64;
+const DIMENSION_UPDATE_BATCH_SIZE = 256;
+const DIMENSION_UPDATE_INTERVAL_MS = 100;
 
 type SetState = StoreApi<AppState>["setState"];
 type GetState = StoreApi<AppState>["getState"];
@@ -424,7 +425,12 @@ export function createStoreRuntime(set: SetState, get: GetState): StoreRuntime {
 
   const loadImageDimensions = async (images: ImageItem[], token: number): Promise<void> => {
     let pending = new Map<string, { width: number; height: number }>();
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
     const flush = () => {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
       if (!pending.size || token !== loadGeneration) {
         pending.clear();
         return;
@@ -438,6 +444,13 @@ export function createStoreRuntime(set: SetState, get: GetState): StoreRuntime {
         }),
       }));
     };
+    const scheduleFlush = () => {
+      if (pending.size >= DIMENSION_UPDATE_BATCH_SIZE) {
+        flush();
+      } else if (!flushTimer) {
+        flushTimer = setTimeout(flush, DIMENSION_UPDATE_INTERVAL_MS);
+      }
+    };
     await mapLimited(
       images,
       LOAD_IPC_CONCURRENCY,
@@ -446,7 +459,7 @@ export function createStoreRuntime(set: SetState, get: GetState): StoreRuntime {
           const [width, height] = await api.imageSize(image.path);
           if (token !== loadGeneration) return;
           pending.set(image.path, { width, height });
-          if (pending.size >= DIMENSION_UPDATE_BATCH_SIZE) flush();
+          scheduleFlush();
         } catch {
           // Image remains usable even when dimensions cannot be read eagerly.
         }
@@ -472,17 +485,30 @@ export function createStoreRuntime(set: SetState, get: GetState): StoreRuntime {
           try {
             const file = await loadImageFile(item.path);
             return {
-              image: { ...item, status: file.status },
+              image: {
+                ...item,
+                status: file.status,
+                hasAnnotations:
+                  file.annotations.length > 0 || file.skippedAnnotations > 0,
+              },
               firstFile: item.path === firstPath ? file : null,
               firstError: null,
               issue: annotationIssue(item.path, file),
             };
           } catch (error) {
+            const name = item.path.split(/[\\/]/).pop() ?? item.path;
+            const issue = `${name}: ${String(error)}`;
             return {
-              image: { ...item, status: "pending" as ImageStatus },
+              image: {
+                ...item,
+                status: "pending" as ImageStatus,
+                // A present but unreadable sidecar must never be treated as
+                // safe to overwrite without confirmation.
+                hasAnnotations: true,
+              },
               firstFile: null,
               firstError: item.path === firstPath ? String(error) : null,
-              issue: null,
+              issue,
             };
           }
         },
@@ -550,13 +576,6 @@ export function createStoreRuntime(set: SetState, get: GetState): StoreRuntime {
     snapshotPreannParams,
     runPreannotation,
     applyPreannotation,
-    annotationCountForPath: async (path) => {
-      const loaded = get().annos[path];
-      if (loaded) return loaded.length;
-      const file = await loadImageFile(path);
-      recordAnnotationIssues(path, file);
-      return file.annotations.length + file.skippedAnnotations;
-    },
     saveImageAfterBatchPreannotation,
     saveCurrentImage,
     annotationFileForExport,

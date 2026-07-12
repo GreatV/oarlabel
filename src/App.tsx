@@ -1,25 +1,22 @@
 import {
   Fragment,
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useRef,
   useState,
+  type DragEvent as ReactDragEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { CanvasStage } from "@/components/CanvasStage";
+import { BatchProgressPanel } from "@/components/BatchProgressPanel";
 import { FileList } from "@/components/FileList";
 import { MenuBar } from "@/components/MenuBar";
 import { ResultsPanel } from "@/components/ResultsPanel";
 import { StatusBar } from "@/components/StatusBar";
 import { TitleBar } from "@/components/TitleBar";
 import { Toolbar, type ToolbarDock } from "@/components/Toolbar";
-import { AboutDialog } from "@/components/dialogs/AboutDialog";
-import { ExportDialog } from "@/components/dialogs/ExportDialog";
-import {
-  SettingsDialog,
-  type SettingsSection,
-} from "@/components/dialogs/SettingsDialog";
-import { ShortcutsDialog } from "@/components/dialogs/ShortcutsDialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { t } from "@/i18n";
 import { useShortcuts } from "@/hooks/useShortcuts";
@@ -45,15 +42,47 @@ import {
 } from "@/lib/panelDock";
 import { useStore } from "@/store";
 
+const SettingsDialog = lazy(() =>
+  import("@/components/dialogs/SettingsDialog").then((module) => ({
+    default: module.SettingsDialog,
+  })),
+);
+const ExportDialog = lazy(() =>
+  import("@/components/dialogs/ExportDialog").then((module) => ({
+    default: module.ExportDialog,
+  })),
+);
+const ShortcutsDialog = lazy(() =>
+  import("@/components/dialogs/ShortcutsDialog").then((module) => ({
+    default: module.ShortcutsDialog,
+  })),
+);
+const AboutDialog = lazy(() =>
+  import("@/components/dialogs/AboutDialog").then((module) => ({
+    default: module.AboutDialog,
+  })),
+);
+
 const TOOLBAR_DOCK_KEY = "oarlabel.toolbarDock";
 const FILE_LIST_WIDTH_KEY = "oarlabel.fileListWidth";
 const RESULTS_WIDTH_KEY = "oarlabel.resultsWidth";
+const FILE_LIST_MIN_WIDTH = 192;
+const FILE_LIST_MAX_WIDTH = 480;
+const RESULTS_MIN_WIDTH = 256;
+const RESULTS_MAX_WIDTH = 720;
 
-function loadPanelWidth(key: string, fallback: number): number {
+function loadPanelWidth(
+  key: string,
+  fallback: number,
+  minWidth: number,
+  maxWidth: number,
+): number {
   const raw = localStorage.getItem(key);
   if (raw === null) return fallback;
   const value = Number(raw);
-  return Number.isFinite(value) ? Math.min(480, Math.max(192, value)) : fallback;
+  return Number.isFinite(value)
+    ? Math.min(maxWidth, Math.max(minWidth, value))
+    : fallback;
 }
 
 function loadToolbarDock(): ToolbarDock {
@@ -108,10 +137,10 @@ function App() {
     right: false,
   });
   const [fileListWidth, setFileListWidth] = useState(() =>
-    loadPanelWidth(FILE_LIST_WIDTH_KEY, 256),
+    loadPanelWidth(FILE_LIST_WIDTH_KEY, 256, FILE_LIST_MIN_WIDTH, FILE_LIST_MAX_WIDTH),
   );
   const [resultsWidth, setResultsWidth] = useState(() =>
-    loadPanelWidth(RESULTS_WIDTH_KEY, 336),
+    loadPanelWidth(RESULTS_WIDTH_KEY, 336, RESULTS_MIN_WIDTH, RESULTS_MAX_WIDTH),
   );
   const [toolbarDock, setToolbarDock] = useState<ToolbarDock>(loadToolbarDock);
   const [panelDocks, setPanelDocks] = useState<PanelDocks>(loadPanelDocks);
@@ -120,14 +149,15 @@ function App() {
     useState<PanelSplitRatios>(loadPanelSplitRatios);
   const [draggingPanel, setDraggingPanel] = useState<PanelId | null>(null);
   const [panelDropTarget, setPanelDropTarget] = useState<PanelDropTarget | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [fileDropActive, setFileDropActive] = useState(false);
   const closeConfirmationRef = useRef<Promise<boolean> | null>(null);
 
   const openFolder = useStore((s) => s.openFolder);
+  const openFiles = useStore((s) => s.openFiles);
   const refreshModels = useStore((s) => s.refreshModels);
   const view = useStore((s) => s.view);
   const locale = useStore((s) => s.locale);
@@ -143,13 +173,44 @@ function App() {
     }
   };
 
+  const handleDroppedPaths = useCallback(
+    async (paths: string[]) => {
+      try {
+        const dropped = await api.inspectDroppedPaths(paths);
+        if (dropped.directories.length === 1 && paths.length === 1) {
+          await openFolder(dropped.directories[0]);
+        } else if (dropped.images.length) {
+          await openFiles(dropped.images);
+        } else {
+          useStore.setState({ statusMsg: t(locale, "message.dropUnsupported") });
+        }
+      } catch (error) {
+        useStore.setState({
+          statusMsg: `${t(locale, "message.loadFailed")}: ${String(error)}`,
+        });
+        console.error("dropped paths failed", error);
+      }
+    },
+    [locale, openFiles, openFolder],
+  );
+
+  // Browser drag events are a fallback for webviews that expose native file
+  // paths on File objects. Tauri's native drag/drop event is the primary path.
+  const handleWebDrop = (event: ReactDragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setFileDropActive(false);
+    const paths = Array.from(event.dataTransfer.files)
+      .map((file) => (file as File & { path?: string }).path)
+      .filter((path): path is string => !!path);
+    if (paths.length) void handleDroppedPaths(paths);
+  };
+
   const handleClose = async () => {
     await win.close();
   };
 
-  const openSettings = useCallback((section: SettingsSection = "general") => {
-    setSettingsSection(section);
-    setSettingsOpen(true);
+  const openSettings = useCallback(() => {
+    setSettingsDialogOpen(true);
   }, []);
   useShortcuts(openSettings);
 
@@ -178,13 +239,14 @@ function App() {
     const startWidth = Math.max(
       ...panels.map((panel) => (panel === "fileList" ? fileListWidth : resultsWidth)),
     );
-    const minWidth = panels.includes("results") ? 256 : 192;
+    const minWidth = panels.includes("results") ? RESULTS_MIN_WIDTH : FILE_LIST_MIN_WIDTH;
+    const maxWidth = panels.includes("results") ? RESULTS_MAX_WIDTH : FILE_LIST_MAX_WIDTH;
     let latestWidth = startWidth;
     const onMove = (moveEvent: globalThis.PointerEvent) => {
       const delta =
         side === "left" ? moveEvent.clientX - startX : startX - moveEvent.clientX;
       const next = startWidth + delta;
-      const clamped = Math.min(480, Math.max(minWidth, next));
+      const clamped = Math.min(maxWidth, Math.max(minWidth, next));
       latestWidth = clamped;
       if (panels.includes("fileList")) setFileListWidth(clamped);
       if (panels.includes("results")) setResultsWidth(clamped);
@@ -285,6 +347,22 @@ function App() {
   }, [locale]);
 
   useEffect(() => {
+    const unlistenPromise = win.onDragDropEvent((event) => {
+      if (event.payload.type === "enter" || event.payload.type === "over") {
+        setFileDropActive(true);
+      } else if (event.payload.type === "leave") {
+        setFileDropActive(false);
+      } else {
+        setFileDropActive(false);
+        void handleDroppedPaths(event.payload.paths);
+      }
+    });
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [handleDroppedPaths]);
+
+  useEffect(() => {
     const unlistenPromise = win.onCloseRequested(async (event) => {
       const state = useStore.getState();
       if (!state.dirty) return;
@@ -354,7 +432,7 @@ function App() {
     const width = sideCollapsed
       ? 40
       : Math.max(
-          panels.includes("results") ? 256 : 192,
+          panels.includes("results") ? RESULTS_MIN_WIDTH : FILE_LIST_MIN_WIDTH,
           ...panels.map((panel) => (panel === "fileList" ? fileListWidth : resultsWidth)),
         );
     const resizableStack = panels.length === 2 && !sideCollapsed;
@@ -415,7 +493,19 @@ function App() {
   };
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-background">
+    <div
+      className="flex h-screen flex-col overflow-hidden bg-background"
+      onDragOver={(event) => {
+        event.preventDefault();
+        setFileDropActive(true);
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setFileDropActive(false);
+        }
+      }}
+      onDrop={handleWebDrop}
+    >
       <TooltipProvider delayDuration={400}>
         <TitleBar onClose={handleClose} />
         {/* On macOS the native global menu replaces this in-window menubar. */}
@@ -472,6 +562,7 @@ function App() {
         )}
 
         {view.statusBar && <StatusBar />}
+        <BatchProgressPanel />
 
         {draggingPanel && panelDropTarget && (
           <div className="pointer-events-none fixed inset-0 z-50 grid grid-cols-2 grid-rows-2" aria-hidden="true">
@@ -505,14 +596,27 @@ function App() {
           </div>
         )}
 
-        <SettingsDialog
-          open={settingsOpen}
-          onOpenChange={setSettingsOpen}
-          initialSection={settingsSection}
-        />
-        <ExportDialog open={exportOpen} onOpenChange={setExportOpen} />
-        <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
-        <AboutDialog open={aboutOpen} onOpenChange={setAboutOpen} />
+        {fileDropActive && !draggingPanel && (
+          <div
+            className="pointer-events-none fixed inset-3 z-50 flex items-center justify-center rounded-xl border-2 border-dashed border-primary bg-background/85 shadow-lg backdrop-blur-sm"
+            aria-hidden="true"
+          >
+            <div className="rounded-lg bg-card px-6 py-4 text-base font-medium text-primary shadow">
+              {t(locale, "drop.openHint")}
+            </div>
+          </div>
+        )}
+
+        <Suspense fallback={null}>
+          {settingsDialogOpen && (
+            <SettingsDialog open onOpenChange={setSettingsDialogOpen} />
+          )}
+          {exportOpen && <ExportDialog open onOpenChange={setExportOpen} />}
+          {shortcutsOpen && (
+            <ShortcutsDialog open onOpenChange={setShortcutsOpen} />
+          )}
+          {aboutOpen && <AboutDialog open onOpenChange={setAboutOpen} />}
+        </Suspense>
       </TooltipProvider>
     </div>
   );

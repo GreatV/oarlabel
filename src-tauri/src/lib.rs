@@ -9,7 +9,7 @@ mod models;
 mod ocr;
 mod project;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::menu::MenuEvent;
 use tauri::{AppHandle, Emitter, Listener, Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -57,15 +57,11 @@ struct MenuPayload {
     locale: String,
     view: std::collections::HashMap<String, bool>,
     #[serde(default)]
-    theme: Option<String>,
-    #[serde(default)]
     ocr_model: Option<String>,
     #[serde(default)]
     layout_model: Option<String>,
     #[serde(default)]
     formula_model: Option<String>,
-    #[serde(default)]
-    device: Option<String>,
     #[serde(default)]
     auto_save: bool,
     #[serde(default)]
@@ -95,11 +91,9 @@ fn menu_payload_to_state(p: MenuPayload) -> Result<(String, menu::ViewState), St
         locale,
         menu::ViewState {
             view: p.view,
-            theme: p.theme,
             ocr_model: p.ocr_model,
             layout_model: p.layout_model,
             formula_model: p.formula_model,
-            device: p.device,
             auto_save: p.auto_save,
             recent_dirs: p.recent_dirs,
         },
@@ -149,13 +143,11 @@ mod tests {
     #[test]
     fn parse_menu_payload_accepts_structured_payload() {
         let (locale, state) = parse_menu_payload(
-            r#"{"locale":"en-US","view":{"fileList":false},"theme":"dark","ocrModel":"ppocrv6_tiny","layoutModel":"layout_doc_v3","formulaModel":"pp_formulanet_plus_s","device":"cpu","autoSave":true,"recentDirs":["/tmp/images"]}"#,
+            r#"{"locale":"en-US","view":{"fileList":false},"ocrModel":"ppocrv6_tiny","layoutModel":"layout_doc_v3","formulaModel":"pp_formulanet_plus_s","autoSave":true,"recentDirs":["/tmp/images"]}"#,
         )
         .expect("structured payload should parse");
         assert_eq!(locale, "en-US");
         assert_eq!(state.view.get("fileList"), Some(&false));
-        assert_eq!(state.theme.as_deref(), Some("dark"));
-        assert_eq!(state.device.as_deref(), Some("cpu"));
         assert!(state.auto_save);
         assert_eq!(state.recent_dirs, vec!["/tmp/images"]);
     }
@@ -219,6 +211,46 @@ async fn image_items(
     })
     .await
     .map_err(|e| format!("Image import task failed: {e}"))?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DroppedPaths {
+    directories: Vec<String>,
+    images: Vec<String>,
+}
+
+/// Inspect paths supplied by the native window drag/drop event without
+/// changing the current workspace authorization. Directory contents are
+/// expanded here so a mixed or multi-directory drop can be opened atomically
+/// through the existing `openFiles` flow after its unsaved-changes check.
+#[tauri::command]
+async fn inspect_dropped_paths(paths: Vec<String>) -> Result<DroppedPaths, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut directories = Vec::new();
+        let mut images = Vec::new();
+        for raw in paths {
+            let Ok(path) = std::fs::canonicalize(raw) else {
+                continue;
+            };
+            if path.is_dir() {
+                let directory = path.to_string_lossy().into_owned();
+                let items = project::list_images(&directory)?;
+                images.extend(items.into_iter().map(|item| item.path));
+                directories.push(directory);
+            } else if path.is_file() && project::is_image(&path) {
+                images.push(path.to_string_lossy().into_owned());
+            }
+        }
+        images.sort();
+        images.dedup();
+        Ok(DroppedPaths {
+            directories,
+            images,
+        })
+    })
+    .await
+    .map_err(|e| format!("Dropped path inspection task failed: {e}"))?
 }
 
 fn activate_image_workspace(
@@ -301,11 +333,6 @@ fn available_devices() -> Vec<devices::DeviceOption> {
 #[tauri::command]
 fn image_extensions() -> Vec<&'static str> {
     project::IMAGE_EXTS.to_vec()
-}
-
-#[tauri::command]
-fn model_status(app: AppHandle) -> Result<Vec<models::ModelStatus>, String> {
-    models::status_all(&app)
 }
 
 #[tauri::command]
@@ -543,6 +570,7 @@ async fn export_dataset(
     tauri::async_runtime::spawn_blocking(move || match kind.as_str() {
         "detection" => export::export_detection(&images, &out_dir),
         "recognition" => export::export_recognition(&images, &out_dir),
+        "formula" => export::export_formula(&images, &out_dir),
         "layout" => export::export_layout(&images, &out_dir),
         other => Err(format!("Unknown export type: {other}")),
     })
@@ -615,7 +643,7 @@ pub fn run() {
                 let repo = "https://github.com/GreatV/oarlabel";
                 let url = match which {
                     "docs" => format!("{repo}#readme"),
-                    "faq" => format!("{repo}#readme"),
+                    "faq" => format!("{repo}/blob/main/docs/FAQ.md"),
                     "feedback" => format!("{repo}/issues"),
                     "update" => format!("{repo}/releases"),
                     _ => return,
@@ -630,11 +658,6 @@ pub fn run() {
             // needed its own listener, so clicks before options loaded no-op'd.
             if let Some(rest) = id.strip_prefix("oar:model:") {
                 let _ = app.emit("oar:model-select", rest);
-                return;
-            }
-            if let Some(theme) = id.strip_prefix("oar:theme:") {
-                menu::set_theme_checked(app, theme);
-                let _ = app.emit(id, ());
                 return;
             }
             if id.starts_with("oar:") {
@@ -701,13 +724,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_images,
             image_items,
+            inspect_dropped_paths,
             image_size,
             read_annotation,
             save_annotation,
             backup_annotation,
             available_devices,
             image_extensions,
-            model_status,
             model_options,
             read_custom_ocr_paths,
             save_custom_ocr_paths,

@@ -6,6 +6,10 @@ Built with [Tauri](https://github.com/tauri-apps/tauri),
 [React](https://github.com/facebook/react), and
 [oar-ocr](https://github.com/GreatV/oar-ocr).
 
+<p align="center">
+  <img src="docs/images/oarlabel-app-overview.png" alt="oarlabel app overview" width="70%" />
+</p>
+
 ## Features
 
 - OCR, layout detection, and formula annotation modes

@@ -12,7 +12,6 @@ import type {
   ImageItem,
   InferenceTuning,
   ModelOptions,
-  ModelStatus,
   PreannResult,
   TextRecognitionRegionResult,
   TextRegionInput,
@@ -26,6 +25,11 @@ export function fileSrc(path: string): string {
 export interface ExportDatasetResult {
   path: string;
   skipped: number;
+}
+
+export interface DroppedPaths {
+  directories: string[];
+  images: string[];
 }
 
 export async function pickFile(title: string, extensions?: string[]): Promise<string | null> {
@@ -53,19 +57,9 @@ export function confirmReplaceAnnotations(locale: Locale, count: number): Promis
 
 export function confirmReplaceBatchAnnotations(
   locale: Locale,
-  imageCount: number,
-  annotatedImageCount: number,
-  annotationCount: number,
-  damagedImageCount = 0,
 ): Promise<boolean> {
   return confirm(
-    tt(
-      locale,
-      damagedImageCount > 0
-        ? "confirm.replaceBatchAnnotationsDamaged.message"
-        : "confirm.replaceBatchAnnotations.message",
-      { imageCount, annotatedImageCount, annotationCount, damagedImageCount },
-    ),
+    t(locale, "confirm.replaceBatchAnnotations.message"),
     { title: t(locale, "confirm.replaceAnnotations.title"), kind: "warning" },
   );
 }
@@ -106,6 +100,8 @@ export const api = {
     invoke<Omit<ImageItem, "status">[]>("list_images", { dir }),
   imageItems: (paths: string[]) =>
     invoke<Omit<ImageItem, "status">[]>("image_items", { paths }),
+  inspectDroppedPaths: (paths: string[]) =>
+    invoke<DroppedPaths>("inspect_dropped_paths", { paths }),
   imageSize: (path: string) => invoke<[number, number]>("image_size", { path }),
   readAnnotation: (imagePath: string) =>
     invoke<string | null>("read_annotation", { imagePath }),
@@ -114,7 +110,6 @@ export const api = {
   backupAnnotation: (imagePath: string) =>
     invoke<string | null>("backup_annotation", { imagePath }),
   availableDevices: () => invoke<DeviceOption[]>("available_devices"),
-  modelStatus: () => invoke<ModelStatus[]>("model_status"),
   modelOptions: () => invoke<ModelOptions>("model_options"),
   readCustomOcrPaths: () => invoke<CustomOcrPaths>("read_custom_ocr_paths"),
   saveCustomOcrPaths: (paths: CustomOcrPaths) =>
@@ -189,6 +184,7 @@ export const win = {
   toggleMaximize: () => appWindow.toggleMaximize(),
   close: () => appWindow.close(),
   onCloseRequested: appWindow.onCloseRequested.bind(appWindow),
+  onDragDropEvent: appWindow.onDragDropEvent.bind(appWindow),
   toggleFullscreen: async () => {
     const full = await appWindow.isFullscreen();
     await appWindow.setFullscreen(!full);

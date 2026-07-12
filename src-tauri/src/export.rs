@@ -1,9 +1,11 @@
 //! Export to PaddleOCR training formats.
 //!
-//! - Detection: PPOCRLabel-style `Label.txt` with one line per image:
+//! - Detection: PaddleOCR `train.txt` / `val.txt` with one line per image:
 //!   `parent/filename\t[{"transcription","points","difficult"}, ...]`
-//! - Recognition: `rec_gt.txt` (`crop_img/xxx.jpg\ttext`) plus a `crop_img/`
-//!   folder of perspective-cropped text line images.
+//! - Recognition and formula recognition: `train_list.txt` / `val_list.txt`
+//!   plus `train/` and `val/` folders of perspective-cropped images.
+//! - Layout detection: COCO `annotations/train.json` / `annotations/val.json`
+//!   plus copied images.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -32,16 +34,17 @@ pub struct ExportImage {
     pub boxes: Vec<ExportBox>,
 }
 
-/// Write `Label.txt` (detection annotations) into `out_dir`.
+/// Write `train.txt` and `val.txt` detection annotations into `out_dir`.
 pub fn export_detection(images: &[ExportImage], out_dir: &str) -> Result<ExportResult, String> {
     let out = Path::new(out_dir);
     let images_dir = out.join("images");
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
 
-    let mut label = String::new();
+    let mut train_label = String::new();
+    let mut val_label = String::new();
     let mut used_names = HashSet::new();
-    for img in images {
+    for (index, img) in images.iter().enumerate() {
         let p = Path::new(&img.path);
         let fname = unique_export_name(p, &mut used_names);
         std::fs::copy(p, images_dir.join(&fname))
@@ -66,73 +69,125 @@ pub fn export_detection(images: &[ExportImage], out_dir: &str) -> Result<ExportR
             .collect();
 
         let json = serde_json::to_string(&arr).map_err(|e| e.to_string())?;
-        label.push_str(&format!("{}\t{}\n", rel, json));
+        let line = format!("{}\t{}\n", rel, json);
+        push_split_line(index, images.len(), &line, &mut train_label, &mut val_label);
     }
 
-    let label_path = out.join("Label.txt");
-    std::fs::write(&label_path, label).map_err(|e| e.to_string())?;
+    let label_path = out.join("train.txt");
+    std::fs::write(&label_path, train_label).map_err(|e| e.to_string())?;
+    std::fs::write(out.join("val.txt"), val_label).map_err(|e| e.to_string())?;
     Ok(ExportResult {
         path: label_path.to_string_lossy().into_owned(),
         skipped: 0,
     })
 }
 
-/// Write `rec_gt.txt` and crop images into `out_dir/crop_img/`.
+/// Write PaddleOCR recognition labels and crop images into train/val splits.
 pub fn export_recognition(images: &[ExportImage], out_dir: &str) -> Result<ExportResult, String> {
+    export_cropped_lists(images, out_dir, "img", "jpg")
+}
+
+/// Write formula recognition labels and crop images into train/val splits.
+pub fn export_formula(images: &[ExportImage], out_dir: &str) -> Result<ExportResult, String> {
+    export_cropped_lists(images, out_dir, "formula", "png")
+}
+
+fn export_cropped_lists(
+    images: &[ExportImage],
+    out_dir: &str,
+    prefix: &str,
+    ext: &str,
+) -> Result<ExportResult, String> {
     let out = Path::new(out_dir);
-    let crop_dir = out.join("crop_img");
-    std::fs::create_dir_all(&crop_dir).map_err(|e| e.to_string())?;
+    let train_dir = out.join("train");
+    let val_dir = out.join("val");
+    std::fs::create_dir_all(&train_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&val_dir).map_err(|e| e.to_string())?;
 
-    let mut gt = String::new();
-    let mut counter: usize = 0;
-    let mut skipped = 0u32;
-    for img in images {
-        if img.boxes.iter().all(|b| b.transcription.trim().is_empty()) {
-            continue;
-        }
-        let src = image::open(&img.path)
-            .map_err(|e| format!("Failed to open image {}: {e}", img.path))?
-            .to_rgb8();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let staging_dir = out.join(format!(".oarlabel-crops-{}-{nonce}", std::process::id()));
+    std::fs::create_dir_all(&staging_dir).map_err(|e| e.to_string())?;
 
-        for b in &img.boxes {
-            let text = b.transcription.trim();
-            if text.is_empty() {
+    // Crop pixels are written to a temporary staging directory immediately.
+    // Keep only lightweight names/text in memory while determining the exact
+    // train/validation split, then copy each staged file to its destination.
+    let result = (|| -> Result<ExportResult, String> {
+        let mut crops = Vec::<(String, String)>::new();
+        let mut skipped = 0u32;
+        for img in images {
+            if img.boxes.iter().all(|b| b.transcription.trim().is_empty()) {
                 continue;
             }
-            let crop = match geometry::crop_quad(&src, &b.points) {
-                Ok(crop) => crop,
-                Err(error) => {
-                    skipped += 1;
-                    tracing::warn!(image = %img.path, %error, "skipping invalid export crop");
+            let src = image::open(&img.path)
+                .map_err(|e| format!("Failed to open image {}: {e}", img.path))?
+                .to_rgb8();
+
+            for b in &img.boxes {
+                let text = b.transcription.trim();
+                if text.is_empty() {
                     continue;
                 }
-            };
-            let name = format!("img_{:06}.jpg", counter);
-            counter += 1;
-            crop.save(crop_dir.join(&name))
-                .map_err(|e| format!("Failed to save crop image: {e}"))?;
-            gt.push_str(&format!("crop_img/{}\t{}\n", name, sanitize_rec_text(text)));
+                let crop = match geometry::crop_quad(&src, &b.points) {
+                    Ok(crop) => crop,
+                    Err(error) => {
+                        skipped += 1;
+                        tracing::warn!(image = %img.path, %error, "skipping invalid export crop");
+                        continue;
+                    }
+                };
+                let name = format!("{prefix}_{:06}.{ext}", crops.len());
+                crop.save(staging_dir.join(&name))
+                    .map_err(|e| format!("Failed to stage crop image: {e}"))?;
+                crops.push((name, sanitize_rec_text(text)));
+            }
         }
-    }
 
-    let gt_path = out.join("rec_gt.txt");
-    std::fs::write(&gt_path, gt).map_err(|e| e.to_string())?;
-    Ok(ExportResult {
-        path: gt_path.to_string_lossy().into_owned(),
-        skipped,
-    })
+        let total = crops.len();
+        let mut train_list = String::new();
+        let mut val_list = String::new();
+        for (index, (name, text)) in crops.into_iter().enumerate() {
+            let source = staging_dir.join(&name);
+            if total == 1 || !is_val_index(index, total) {
+                std::fs::copy(&source, train_dir.join(&name))
+                    .map_err(|e| format!("Failed to save training crop: {e}"))?;
+                train_list.push_str(&format!("train/{name}\t{text}\n"));
+            }
+            if total == 1 || is_val_index(index, total) {
+                std::fs::copy(&source, val_dir.join(&name))
+                    .map_err(|e| format!("Failed to save validation crop: {e}"))?;
+                val_list.push_str(&format!("val/{name}\t{text}\n"));
+            }
+        }
+
+        let train_path = out.join("train_list.txt");
+        std::fs::write(&train_path, train_list).map_err(|e| e.to_string())?;
+        std::fs::write(out.join("val_list.txt"), val_list).map_err(|e| e.to_string())?;
+        Ok(ExportResult {
+            path: train_path.to_string_lossy().into_owned(),
+            skipped,
+        })
+    })();
+    std::fs::remove_dir_all(staging_dir).ok();
+    result
 }
 
 /// Export layout annotations as a COCO detection dataset.
 pub fn export_layout(images: &[ExportImage], out_dir: &str) -> Result<ExportResult, String> {
     let out = Path::new(out_dir);
     let images_dir = out.join("images");
+    let annotations_dir = out.join("annotations");
     std::fs::create_dir_all(&images_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&annotations_dir).map_err(|e| e.to_string())?;
 
     let mut used_names = HashSet::new();
     let mut category_ids = HashMap::<String, u64>::new();
-    let mut coco_images = Vec::new();
-    let mut coco_annotations = Vec::new();
+    let mut train_images = Vec::new();
+    let mut train_annotations = Vec::new();
+    let mut val_images = Vec::new();
+    let mut val_annotations = Vec::new();
     let mut annotation_id = 1u64;
     let mut skipped = 0u32;
 
@@ -145,12 +200,13 @@ pub fn export_layout(images: &[ExportImage], out_dir: &str) -> Result<ExportResu
         let (width, height) = image::image_dimensions(source)
             .map_err(|e| format!("Failed to read image dimensions {}: {e}", image.path))?;
         let image_id = image_index as u64 + 1;
-        coco_images.push(serde_json::json!({
+        let coco_image = serde_json::json!({
             "id": image_id,
-            "file_name": format!("images/{filename}"),
+            "file_name": filename,
             "width": width,
             "height": height
-        }));
+        });
+        let mut image_annotations = Vec::new();
 
         for b in &image.boxes {
             if b.points.len() < 3 || !b.points.iter().flatten().all(|value| value.is_finite()) {
@@ -189,7 +245,7 @@ pub fn export_layout(images: &[ExportImage], out_dir: &str) -> Result<ExportResu
                 .iter()
                 .flat_map(|point| [point[0], point[1]])
                 .collect::<Vec<_>>();
-            coco_annotations.push(serde_json::json!({
+            image_annotations.push(serde_json::json!({
                 "id": annotation_id,
                 "image_id": image_id,
                 "category_id": category_id,
@@ -200,6 +256,15 @@ pub fn export_layout(images: &[ExportImage], out_dir: &str) -> Result<ExportResu
             }));
             annotation_id += 1;
         }
+
+        if images.len() == 1 || !is_val_index(image_index, images.len()) {
+            train_images.push(coco_image.clone());
+            train_annotations.extend(image_annotations.iter().cloned());
+        }
+        if images.len() == 1 || is_val_index(image_index, images.len()) {
+            val_images.push(coco_image);
+            val_annotations.extend(image_annotations);
+        }
     }
 
     let mut categories = category_ids
@@ -207,24 +272,44 @@ pub fn export_layout(images: &[ExportImage], out_dir: &str) -> Result<ExportResu
         .map(|(name, id)| serde_json::json!({ "id": id, "name": name }))
         .collect::<Vec<_>>();
     categories.sort_by_key(|category| category["id"].as_u64().unwrap_or_default());
-    let output = serde_json::json!({
-        "images": coco_images,
-        "annotations": coco_annotations,
-        "categories": categories
-    });
-    let path = out.join("layout_coco.json");
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&output).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    let train_path = annotations_dir.join("train.json");
+    write_coco(
+        &train_path,
+        train_images,
+        train_annotations,
+        categories.clone(),
+    )?;
+    write_coco(
+        &annotations_dir.join("val.json"),
+        val_images,
+        val_annotations,
+        categories,
+    )?;
     Ok(ExportResult {
-        path: path.to_string_lossy().into_owned(),
+        path: train_path.to_string_lossy().into_owned(),
         skipped,
     })
 }
 
-/// Normalize a recognition transcription for the TSV `rec_gt.txt` format.
+fn write_coco(
+    path: &Path,
+    images: Vec<serde_json::Value>,
+    annotations: Vec<serde_json::Value>,
+    categories: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    let output = serde_json::json!({
+        "images": images,
+        "annotations": annotations,
+        "categories": categories
+    });
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(&output).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Normalize a recognition transcription for the TSV list format.
 /// Each record must be one tab-separated line, so any control character that
 /// would break line/field splitting (\r, \n, \t, and other C0 controls) is
 /// collapsed to a single space.
@@ -266,6 +351,23 @@ fn unique_export_name(path: &Path, used: &mut HashSet<String>) -> String {
             return name;
         }
         idx += 1;
+    }
+}
+
+fn is_val_index(index: usize, total: usize) -> bool {
+    if total <= 1 {
+        return true;
+    }
+    let val_count = (total / 10).max(1);
+    index >= total - val_count
+}
+
+fn push_split_line(index: usize, total: usize, line: &str, train: &mut String, val: &mut String) {
+    if total == 1 || !is_val_index(index, total) {
+        train.push_str(line);
+    }
+    if total == 1 || is_val_index(index, total) {
+        val.push_str(line);
     }
 }
 
@@ -312,6 +414,39 @@ mod tests {
     }
 
     #[test]
+    fn detection_export_writes_paddleocr_train_file() {
+        let dir = temp_dir("detection");
+        let source = dir.join("source.png");
+        RgbImage::from_pixel(8, 8, Rgb([255, 255, 255]))
+            .save(&source)
+            .unwrap();
+        let output = dir.join("output");
+        let result = export_detection(
+            &[ExportImage {
+                path: source.to_string_lossy().into_owned(),
+                boxes: vec![ExportBox {
+                    points: vec![[1.0, 1.0], [6.0, 1.0], [6.0, 5.0], [1.0, 5.0]],
+                    transcription: "text".into(),
+                    label: None,
+                }],
+            }],
+            &output.to_string_lossy(),
+        )
+        .expect("detection export");
+
+        let label_path = Path::new(&result.path);
+        assert_eq!(label_path.file_name().unwrap(), "train.txt");
+        assert!(output.join("images").join("source.png").exists());
+        assert!(std::fs::read_to_string(label_path)
+            .unwrap()
+            .starts_with("images/source.png\t"));
+        assert!(std::fs::read_to_string(output.join("val.txt"))
+            .unwrap()
+            .starts_with("images/source.png\t"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn recognition_export_skips_invalid_crops() {
         let dir = temp_dir("invalid-crop");
         let source = dir.join("source.png");
@@ -333,7 +468,94 @@ mod tests {
         .expect("export should continue");
 
         assert_eq!(result.skipped, 1);
+        assert_eq!(
+            Path::new(&result.path).file_name().unwrap(),
+            "train_list.txt"
+        );
         assert_eq!(std::fs::read_to_string(result.path).unwrap(), "");
+        assert_eq!(
+            std::fs::read_to_string(output.join("val_list.txt")).unwrap(),
+            ""
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn recognition_export_writes_paddleocr_train_and_val_lists() {
+        let dir = temp_dir("recognition");
+        let source = dir.join("source.png");
+        RgbImage::from_pixel(16, 16, Rgb([255, 255, 255]))
+            .save(&source)
+            .unwrap();
+        let output = dir.join("output");
+        let result = export_recognition(
+            &[ExportImage {
+                path: source.to_string_lossy().into_owned(),
+                boxes: vec![ExportBox {
+                    points: vec![[1.0, 1.0], [14.0, 1.0], [14.0, 10.0], [1.0, 10.0]],
+                    transcription: "hello".into(),
+                    label: None,
+                }],
+            }],
+            &output.to_string_lossy(),
+        )
+        .expect("recognition export");
+
+        let gt = std::fs::read_to_string(&result.path).unwrap();
+        assert_eq!(
+            Path::new(&result.path).file_name().unwrap(),
+            "train_list.txt"
+        );
+        assert_eq!(gt, "train/img_000000.jpg\thello\n");
+        assert_eq!(
+            std::fs::read_to_string(output.join("val_list.txt")).unwrap(),
+            "val/img_000000.jpg\thello\n"
+        );
+        assert!(output.join("train").join("img_000000.jpg").exists());
+        assert!(output.join("val").join("img_000000.jpg").exists());
+        assert!(std::fs::read_dir(&output)
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".oarlabel-crops-")));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn formula_export_uses_recognition_list_format() {
+        let dir = temp_dir("formula");
+        let source = dir.join("source.png");
+        RgbImage::from_pixel(24, 16, Rgb([255, 255, 255]))
+            .save(&source)
+            .unwrap();
+        let output = dir.join("output");
+        let result = export_formula(
+            &[ExportImage {
+                path: source.to_string_lossy().into_owned(),
+                boxes: vec![ExportBox {
+                    points: vec![[1.0, 1.0], [22.0, 1.0], [22.0, 12.0], [1.0, 12.0]],
+                    transcription: r"\frac{1}{2}".into(),
+                    label: Some("formula".into()),
+                }],
+            }],
+            &output.to_string_lossy(),
+        )
+        .expect("formula export");
+
+        let gt = std::fs::read_to_string(&result.path).unwrap();
+        assert_eq!(
+            Path::new(&result.path).file_name().unwrap(),
+            "train_list.txt"
+        );
+        assert_eq!(gt, "train/formula_000000.png\t\\frac{1}{2}\n");
+        assert_eq!(
+            std::fs::read_to_string(output.join("val_list.txt")).unwrap(),
+            "val/formula_000000.png\t\\frac{1}{2}\n"
+        );
+        assert!(output.join("train").join("formula_000000.png").exists());
+        assert!(output.join("val").join("formula_000000.png").exists());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -358,10 +580,22 @@ mod tests {
         )
         .expect("layout export");
 
+        let coco_path = Path::new(&result.path);
+        assert_eq!(coco_path.file_name().unwrap(), "train.json");
+        assert_eq!(
+            coco_path.parent().unwrap().file_name().unwrap(),
+            "annotations"
+        );
         let coco: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(result.path).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(coco_path).unwrap()).unwrap();
         assert_eq!(coco["annotations"].as_array().unwrap().len(), 1);
+        assert_eq!(coco["images"][0]["file_name"], "source.png");
         assert_eq!(coco["categories"][0]["name"], "title");
+        let val_coco: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(output.join("annotations").join("val.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(val_coco["annotations"].as_array().unwrap().len(), 1);
         std::fs::remove_dir_all(dir).ok();
     }
 }

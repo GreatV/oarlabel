@@ -33,9 +33,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+unicode-bidi = "0.3"
 
 # OCR / image processing
-oar-ocr = { version = "0.8.0", features = ["auto-download"] }
+oar-ocr = { version = "=0.8.0", features = ["auto-download"] }
 image = "0.25"
 
 walkdir = "2"

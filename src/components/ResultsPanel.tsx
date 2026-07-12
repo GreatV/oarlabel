@@ -1,7 +1,5 @@
 import { ChevronLeft, ChevronRight, FileText, GripVertical, ScanText } from "lucide-react";
-import katex from "katex";
-import "katex/dist/katex.min.css";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { Button } from "@/components/ui/button";
@@ -100,20 +98,6 @@ export function ResultsPanel({ collapsed, onToggle, side, onDockDragStart }: Res
       <div className="flex items-center justify-between px-3 py-2.5">
         <span className="text-sm font-semibold">{t(l, "results.title.generic")}</span>
         <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 gap-1.5 px-2"
-            disabled={!annos.length || busy || batchRunning || mode === "layout"}
-            onClick={() => recognizeAllTextBoxes()}
-          >
-            <ScanText className="h-3.5 w-3.5" />
-            {t(l, "results.recognizeAllText")}
-          </Button>
-          <span className="text-xs text-muted-foreground">
-            {annos.length} {t(l, "results.items")}
-          </span>
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -150,26 +134,41 @@ export function ResultsPanel({ collapsed, onToggle, side, onDockDragStart }: Res
           </Tooltip>
         </div>
       </div>
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="px-2 pb-3">
-          {annos.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
-              <FileText className="h-8 w-8 text-muted-foreground/70" />
-              <div className="text-sm font-medium text-foreground">{t(l, "results.emptyTitle")}</div>
-              <p className="text-xs leading-5 text-muted-foreground">{t(l, "results.empty")}</p>
-            </div>
-          ) : (
-            annos.map((anno, index) => (
-              <ResultRow key={anno.id} anno={anno} index={index} />
-            ))
-          )}
-        </div>
-      </ScrollArea>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div className="min-h-0 flex-1">
+            <ScrollArea className="h-full">
+              <div className="px-2 pb-3" role="listbox" aria-multiselectable="true">
+                {annos.length === 0 ? (
+                  <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
+                    <FileText className="h-8 w-8 text-muted-foreground/70" />
+                    <div className="text-sm font-medium text-foreground">{t(l, "results.emptyTitle")}</div>
+                    <p className="text-xs leading-5 text-muted-foreground">{t(l, "results.empty")}</p>
+                  </div>
+                ) : (
+                  annos.map((anno, index) => (
+                    <ResultRow key={anno.id} anno={anno} index={index} />
+                  ))
+                )}
+              </div>
+            </ScrollArea>
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem
+            disabled={!annos.length || busy || batchRunning || mode === "layout"}
+            onClick={() => void recognizeAllTextBoxes()}
+          >
+            <ScanText className="h-4 w-4 text-muted-foreground" />
+            {t(l, "results.recognizeAllText")}
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
     </div>
   );
 }
 
-function ResultRow({
+const ResultRow = memo(function ResultRow({
   anno,
   index,
 }: {
@@ -192,6 +191,7 @@ function ResultRow({
     paste,
     ensureTextResult,
     recognizeSelectedText,
+    recognizeAllTextBoxes,
     removeAnnotation,
     selectAll,
     clearSelection,
@@ -214,6 +214,7 @@ function ResultRow({
         paste: s.paste,
         ensureTextResult: s.ensureTextResult,
         recognizeSelectedText: s.recognizeSelectedText,
+        recognizeAllTextBoxes: s.recognizeAllTextBoxes,
         removeAnnotation: s.removeAnnotation,
         selectAll: s.selectAll,
         clearSelection: s.clearSelection,
@@ -235,7 +236,16 @@ function ResultRow({
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
+          role="option"
+          aria-selected={selected}
+          tabIndex={0}
           onClick={(e) => select(anno.id, e.ctrlKey || e.metaKey)}
+          onKeyDown={(e) => {
+            if (e.target !== e.currentTarget) return;
+            if (e.key !== "Enter" && e.key !== " ") return;
+            e.preventDefault();
+            select(anno.id, e.ctrlKey || e.metaKey);
+          }}
           onContextMenu={() => {
             // Select the right-clicked row first so Copy/Delete below act on it.
             if (!selected) select(anno.id);
@@ -324,6 +334,12 @@ function ResultRow({
         >
           {t(l, "results.recognizeText")}
         </ContextMenuItem>
+        <ContextMenuItem
+          onClick={() => recognizeAllTextBoxes()}
+          disabled={busy || batchRunning || mode === "layout"}
+        >
+          {t(l, "results.recognizeAllText")}
+        </ContextMenuItem>
         <ContextMenuItem disabled={busy} onClick={() => removeAnnotation(anno.id)}>
           {t(l, "toolbar.delete")}
           <ContextMenuShortcut>Del</ContextMenuShortcut>
@@ -340,17 +356,44 @@ function ResultRow({
       </ContextMenuContent>
     </ContextMenu>
   );
+});
+
+let katexPromise: Promise<typeof import("katex").default> | null = null;
+
+function loadKatex() {
+  katexPromise ??= Promise.all([
+    import("katex"),
+    import("katex/dist/katex.min.css"),
+  ]).then(([module]) => module.default);
+  return katexPromise;
 }
 
 function FormulaPreview({ latex }: { latex: string }) {
-  const html = useMemo(() => {
-    if (!latex.trim()) return "";
-    return katex.renderToString(latex, {
-      displayMode: true,
-      throwOnError: false,
-      strict: "ignore",
-    });
+  const [html, setHtml] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setHtml("");
+    if (!latex.trim()) return;
+    void loadKatex()
+      .then((katex) => {
+        if (cancelled) return;
+        setHtml(
+          katex.renderToString(latex, {
+            displayMode: true,
+            throwOnError: false,
+            strict: "ignore",
+          }),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setHtml("");
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [latex]);
+
   if (!html) return null;
   return (
     <div
@@ -373,12 +416,13 @@ function CommitTextarea({
   ariaLabel: string;
   onCommit: (value: string) => void;
 }) {
-  const [draft, setDraft] = useState(value);
+  const withoutLineBreaks = (text: string) => text.replace(/[\r\n]+/g, " ");
+  const [draft, setDraft] = useState(() => withoutLineBreaks(value));
   const cancelRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
-    setDraft(value);
+    setDraft(withoutLineBreaks(value));
   }, [value]);
 
   useLayoutEffect(() => {
@@ -393,28 +437,31 @@ function CommitTextarea({
       cancelRef.current = false;
       return;
     }
-    if (draft !== value) onCommit(draft);
+    if (draft !== withoutLineBreaks(value)) onCommit(draft);
   };
 
   return (
     <textarea
       ref={textareaRef}
       rows={1}
+      dir="auto"
       value={draft}
       disabled={disabled}
       placeholder={placeholder}
       aria-label={ariaLabel}
       onMouseDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
-      onChange={(e) => setDraft(e.target.value)}
+      onChange={(e) => setDraft(withoutLineBreaks(e.target.value))}
       onBlur={commit}
       onKeyDown={(e) => {
         e.stopPropagation();
         if (e.key === "Escape") {
+          e.preventDefault();
           cancelRef.current = true;
-          setDraft(value);
+          setDraft(withoutLineBreaks(value));
           e.currentTarget.blur();
-        } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+        } else if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+          e.preventDefault();
           e.currentTarget.blur();
         }
       }}

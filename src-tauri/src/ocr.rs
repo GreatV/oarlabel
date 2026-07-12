@@ -21,6 +21,7 @@ use oar_ocr::processors::layout_sorting::{sort_layout_enhanced, SortableElement}
 use oar_ocr::utils::load_image;
 use serde::Serialize;
 use tauri::AppHandle;
+use unicode_bidi::BidiInfo;
 
 use crate::{geometry, models};
 
@@ -77,6 +78,24 @@ mod cancellation_tests {
     }
 }
 
+#[cfg(test)]
+mod rtl_text_tests {
+    use super::reorder_bidi_text;
+
+    #[test]
+    fn converts_visual_rtl_text_to_logical_order() {
+        assert_eq!(
+            reorder_bidi_text("\u{0627}\u{0628}\u{062d}\u{0631}\u{0645}"),
+            "\u{0645}\u{0631}\u{062d}\u{0628}\u{0627}"
+        );
+    }
+
+    #[test]
+    fn leaves_ltr_text_unchanged() {
+        assert_eq!(reorder_bidi_text("hello 123"), "hello 123");
+    }
+}
+
 fn resolve_model_path(app: &AppHandle, key: &str, role: &str) -> Result<PathBuf, String> {
     let def = models::def(app, key)?;
     models::resolve(app, key).ok_or_else(|| match def.source {
@@ -113,6 +132,47 @@ fn apply_text_recognition_tuning(
         if let Some(v) = t.score_threshold {
             cfg.score_threshold = v;
         }
+    }
+}
+
+fn should_postprocess_rtl(profile: &models::OcrProfile) -> bool {
+    matches!(
+        profile.text_direction,
+        Some(models::TextDirection::Rtl | models::TextDirection::Auto)
+    )
+}
+
+fn reorder_bidi_line(line: &str) -> String {
+    let bidi_info = BidiInfo::new(line, None);
+    let Some(para) = bidi_info.paragraphs.first() else {
+        return line.to_string();
+    };
+
+    bidi_info
+        .reorder_line(para, para.range.clone())
+        .into_owned()
+}
+
+fn reorder_bidi_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+
+    for segment in text.split_inclusive('\n') {
+        if let Some(line) = segment.strip_suffix('\n') {
+            out.push_str(&reorder_bidi_line(line));
+            out.push('\n');
+        } else {
+            out.push_str(&reorder_bidi_line(segment));
+        }
+    }
+
+    out
+}
+
+fn postprocess_text_for_profile(profile: &models::OcrProfile, text: String) -> String {
+    if should_postprocess_rtl(profile) {
+        reorder_bidi_text(&text)
+    } else {
+        text
     }
 }
 
@@ -181,6 +241,17 @@ static TEXT_RECOGNITION: OnceLock<Mutex<HashMap<String, Arc<TextRecognitionPredi
 static LAYOUT: OnceLock<Mutex<HashMap<String, Arc<LayoutDetectionPredictor>>>> = OnceLock::new();
 static FORMULA: OnceLock<Mutex<HashMap<String, Arc<FormulaRecognitionPredictor>>>> =
     OnceLock::new();
+// Model construction is memory-intensive. Cache lookup remains concurrent,
+// but a cold miss is singleflight so parallel batch requests cannot build the
+// same (or multiple large) pipelines at the same time.
+static PIPELINE_BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn lock_pipeline_build() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    PIPELINE_BUILD_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|e| e.to_string())
+}
 
 fn ort_config_for(device: &str) -> Result<Option<OrtSessionConfig>, String> {
     let d = device.to_lowercase();
@@ -266,6 +337,15 @@ fn get_or_build_ocr(
         tracing::debug!(profile = %profile_key, device = %device, "reuse cached OCR pipeline");
         return Ok(existing.clone());
     }
+    let _build_guard = lock_pipeline_build()?;
+    if let Some(existing) = cell
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(existing);
+    }
 
     let det = resolve_model_path(app, &prof.det, "text detection model")?;
     let rec = resolve_predictor_asset_path(app, &prof.rec, "text recognition model")?;
@@ -334,6 +414,15 @@ fn get_or_build_text_recognition(
         );
         return Ok(existing.clone());
     }
+    let _build_guard = lock_pipeline_build()?;
+    if let Some(existing) = cell
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(existing);
+    }
 
     let rec = resolve_predictor_asset_path(app, &prof.rec, "text recognition model")?;
     let dict = resolve_predictor_asset_path(app, &prof.dict, "text recognition dictionary")?;
@@ -393,6 +482,15 @@ fn get_or_build_layout(
     {
         return Ok(existing.clone());
     }
+    let _build_guard = lock_pipeline_build()?;
+    if let Some(existing) = cell
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(existing);
+    }
 
     let model = resolve_model_path(app, layout_key, "layout detection model")?;
     let model_name = d
@@ -433,6 +531,15 @@ fn get_or_build_formula(
     {
         return Ok(existing.clone());
     }
+    let _build_guard = lock_pipeline_build()?;
+    if let Some(existing) = cell
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(existing);
+    }
 
     let prof = models::formula_profile(app, formula_key)?;
     let model = resolve_model_path(app, &prof.model, "formula recognition model")?;
@@ -466,6 +573,7 @@ pub fn recognize_text_regions(
     tuning: Option<models::InferenceTuning>,
 ) -> Result<TextRecognitionRegionResult, String> {
     let requested = regions.len();
+    let prof = models::profile(app, profile_key)?;
     tracing::info!(
         image = %image_path,
         profile = %profile_key,
@@ -542,6 +650,7 @@ pub fn recognize_text_regions(
             skipped += 1;
             continue;
         };
+        let text = postprocess_text_for_profile(&prof, text);
         out.push(RecognizedTextRegion {
             id,
             text,
@@ -641,6 +750,7 @@ pub fn run_ocr(
     tuning: Option<models::InferenceTuning>,
 ) -> Result<PreannResult, String> {
     check_preannotation_cancelled()?;
+    let prof = models::profile(app, profile_key)?;
     let ocr = get_or_build_ocr(app, profile_key, device, tuning)?;
     check_preannotation_cancelled()?;
     let img =
@@ -663,9 +773,12 @@ pub fn run_ocr(
             if points.is_empty() {
                 continue;
             }
+            let text = region
+                .text
+                .map(|t| postprocess_text_for_profile(&prof, t.to_string()));
             out.push(PreannBox {
                 points,
-                text: region.text.map(|t| t.to_string()),
+                text,
                 label: None,
                 score: region.confidence,
             });

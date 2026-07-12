@@ -16,8 +16,6 @@ export const SHORTCUTS: Shortcut[] = [
   { keys: "Ctrl+A", descKey: "shortcuts.selectAll" },
   { keys: "Backspace / Delete", descKey: "shortcuts.deleteOrUndoPoint" },
   { keys: "Esc", descKey: "shortcuts.cancel" },
-  { keys: "Enter", descKey: "shortcuts.finishPolygon" },
-  { keys: "Space", descKey: "shortcuts.panCanvas" },
   { keys: "A / ←", descKey: "shortcuts.prev" },
   { keys: "D / →", descKey: "shortcuts.next" },
   { keys: "Ctrl+=", descKey: "shortcuts.zoomIn" },

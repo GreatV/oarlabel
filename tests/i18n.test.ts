@@ -34,11 +34,7 @@ describe("i18n", () => {
       expect.arrayContaining([
         { keys: "Ctrl+Y", descKey: "shortcuts.redo" },
         { keys: "Backspace / Delete", descKey: "shortcuts.deleteOrUndoPoint" },
-        { keys: "Enter", descKey: "shortcuts.finishPolygon" },
-        { keys: "Space", descKey: "shortcuts.panCanvas" },
       ]),
     );
-    expect(t("zh-CN", "shortcuts.finishPolygon")).toBe("完成多边形绘制");
-    expect(t("en-US", "shortcuts.panCanvas")).toBe("Hold to pan canvas");
   });
 });
