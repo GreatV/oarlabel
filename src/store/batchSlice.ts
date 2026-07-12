@@ -52,7 +52,9 @@ export const createBatchSlice = (
       if (!allImages.length || get().busy || get().batchRunning) return;
       const locale = get().locale;
       const isAnnotated = (image: (typeof allImages)[number]) =>
-        image.status !== "pending" || !!get().annotationErrors[image.path];
+        image.hasAnnotations === true ||
+        image.status !== "pending" ||
+        !!get().annotationErrors[image.path];
       const hasExistingAnnotations = allImages.some(isAnnotated);
       const images = options.skipAnnotated
         ? allImages.filter((image) => !isAnnotated(image))

@@ -485,17 +485,30 @@ export function createStoreRuntime(set: SetState, get: GetState): StoreRuntime {
           try {
             const file = await loadImageFile(item.path);
             return {
-              image: { ...item, status: file.status },
+              image: {
+                ...item,
+                status: file.status,
+                hasAnnotations:
+                  file.annotations.length > 0 || file.skippedAnnotations > 0,
+              },
               firstFile: item.path === firstPath ? file : null,
               firstError: null,
               issue: annotationIssue(item.path, file),
             };
           } catch (error) {
+            const name = item.path.split(/[\\/]/).pop() ?? item.path;
+            const issue = `${name}: ${String(error)}`;
             return {
-              image: { ...item, status: "pending" as ImageStatus },
+              image: {
+                ...item,
+                status: "pending" as ImageStatus,
+                // A present but unreadable sidecar must never be treated as
+                // safe to overwrite without confirmation.
+                hasAnnotations: true,
+              },
               firstFile: null,
               firstError: item.path === firstPath ? String(error) : null,
-              issue: null,
+              issue,
             };
           }
         },

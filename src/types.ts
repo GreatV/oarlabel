@@ -20,6 +20,9 @@ export interface ImageItem {
   path: string;
   name: string;
   status: ImageStatus;
+  /** Derived while opening the workspace so batch actions can detect saved
+   * annotations even when a sidecar still reports `status: "pending"`. */
+  hasAnnotations?: boolean;
   width?: number;
   height?: number;
 }

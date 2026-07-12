@@ -43,7 +43,7 @@ export const createExportSlice = (
                     annotation.results.some(
                       (result) =>
                         result.task === "layout_detection" &&
-                        typeof result.value.label === "string" &&
+                        typeof result.value?.label === "string" &&
                         result.value.label.trim().toLowerCase() === "formula",
                     )
                   );

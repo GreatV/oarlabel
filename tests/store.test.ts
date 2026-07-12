@@ -864,7 +864,10 @@ describe("pre-annotation settings", () => {
 
   it("can skip images that already have annotations", async () => {
     useStore.setState({
-      images: [images[0], { ...images[1], status: "pending" }],
+      images: [
+        { ...images[0], status: "pending", hasAnnotations: true },
+        { ...images[1], status: "pending", hasAnnotations: false },
+      ],
     });
 
     await useStore.getState().preannotateAll({
@@ -877,6 +880,21 @@ describe("pre-annotation settings", () => {
     expect(mocks.preannotate.mock.calls[0][0]).toBe(images[1].path);
     expect(mocks.saveAnnotation).toHaveBeenCalledOnce();
     expect(useStore.getState().batchTotal).toBe(1);
+  });
+
+  it("warns before replacing annotations saved with pending status", async () => {
+    mocks.confirmReplaceBatchAnnotations.mockResolvedValueOnce(false);
+    useStore.setState({
+      images: [
+        { ...images[0], status: "pending", hasAnnotations: true },
+        { ...images[1], status: "pending", hasAnnotations: false },
+      ],
+    });
+
+    await useStore.getState().preannotateAll();
+
+    expect(mocks.confirmReplaceBatchAnnotations).toHaveBeenCalledOnce();
+    expect(mocks.preannotate).not.toHaveBeenCalled();
   });
 });
 

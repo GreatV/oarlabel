@@ -104,59 +104,74 @@ fn export_cropped_lists(
     std::fs::create_dir_all(&train_dir).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&val_dir).map_err(|e| e.to_string())?;
 
-    let mut crops = Vec::<(image::RgbImage, String)>::new();
-    let mut skipped = 0u32;
-    for img in images {
-        if img.boxes.iter().all(|b| b.transcription.trim().is_empty()) {
-            continue;
-        }
-        let src = image::open(&img.path)
-            .map_err(|e| format!("Failed to open image {}: {e}", img.path))?
-            .to_rgb8();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let staging_dir = out.join(format!(".oarlabel-crops-{}-{nonce}", std::process::id()));
+    std::fs::create_dir_all(&staging_dir).map_err(|e| e.to_string())?;
 
-        for b in &img.boxes {
-            let text = b.transcription.trim();
-            if text.is_empty() {
+    // Crop pixels are written to a temporary staging directory immediately.
+    // Keep only lightweight names/text in memory while determining the exact
+    // train/validation split, then copy each staged file to its destination.
+    let result = (|| -> Result<ExportResult, String> {
+        let mut crops = Vec::<(String, String)>::new();
+        let mut skipped = 0u32;
+        for img in images {
+            if img.boxes.iter().all(|b| b.transcription.trim().is_empty()) {
                 continue;
             }
-            let crop = match geometry::crop_quad(&src, &b.points) {
-                Ok(crop) => crop,
-                Err(error) => {
-                    skipped += 1;
-                    tracing::warn!(image = %img.path, %error, "skipping invalid export crop");
+            let src = image::open(&img.path)
+                .map_err(|e| format!("Failed to open image {}: {e}", img.path))?
+                .to_rgb8();
+
+            for b in &img.boxes {
+                let text = b.transcription.trim();
+                if text.is_empty() {
                     continue;
                 }
-            };
-            crops.push((crop, sanitize_rec_text(text)));
+                let crop = match geometry::crop_quad(&src, &b.points) {
+                    Ok(crop) => crop,
+                    Err(error) => {
+                        skipped += 1;
+                        tracing::warn!(image = %img.path, %error, "skipping invalid export crop");
+                        continue;
+                    }
+                };
+                let name = format!("{prefix}_{:06}.{ext}", crops.len());
+                crop.save(staging_dir.join(&name))
+                    .map_err(|e| format!("Failed to stage crop image: {e}"))?;
+                crops.push((name, sanitize_rec_text(text)));
+            }
         }
-    }
 
-    let total = crops.len();
-    let mut train_list = String::new();
-    let mut val_list = String::new();
-    for (index, (crop, text)) in crops.into_iter().enumerate() {
-        let name = format!("{prefix}_{index:06}.{ext}");
-        let train_line = format!("train/{}\t{}\n", name, text);
-        let val_line = format!("val/{}\t{}\n", name, text);
-        if total == 1 || !is_val_index(index, total) {
-            crop.save(train_dir.join(&name))
-                .map_err(|e| format!("Failed to save crop image: {e}"))?;
-            train_list.push_str(&train_line);
+        let total = crops.len();
+        let mut train_list = String::new();
+        let mut val_list = String::new();
+        for (index, (name, text)) in crops.into_iter().enumerate() {
+            let source = staging_dir.join(&name);
+            if total == 1 || !is_val_index(index, total) {
+                std::fs::copy(&source, train_dir.join(&name))
+                    .map_err(|e| format!("Failed to save training crop: {e}"))?;
+                train_list.push_str(&format!("train/{name}\t{text}\n"));
+            }
+            if total == 1 || is_val_index(index, total) {
+                std::fs::copy(&source, val_dir.join(&name))
+                    .map_err(|e| format!("Failed to save validation crop: {e}"))?;
+                val_list.push_str(&format!("val/{name}\t{text}\n"));
+            }
         }
-        if total == 1 || is_val_index(index, total) {
-            crop.save(val_dir.join(&name))
-                .map_err(|e| format!("Failed to save crop image: {e}"))?;
-            val_list.push_str(&val_line);
-        }
-    }
 
-    let train_path = out.join("train_list.txt");
-    std::fs::write(&train_path, train_list).map_err(|e| e.to_string())?;
-    std::fs::write(out.join("val_list.txt"), val_list).map_err(|e| e.to_string())?;
-    Ok(ExportResult {
-        path: train_path.to_string_lossy().into_owned(),
-        skipped,
-    })
+        let train_path = out.join("train_list.txt");
+        std::fs::write(&train_path, train_list).map_err(|e| e.to_string())?;
+        std::fs::write(out.join("val_list.txt"), val_list).map_err(|e| e.to_string())?;
+        Ok(ExportResult {
+            path: train_path.to_string_lossy().into_owned(),
+            skipped,
+        })
+    })();
+    std::fs::remove_dir_all(staging_dir).ok();
+    result
 }
 
 /// Export layout annotations as a COCO detection dataset.
@@ -498,6 +513,13 @@ mod tests {
         );
         assert!(output.join("train").join("img_000000.jpg").exists());
         assert!(output.join("val").join("img_000000.jpg").exists());
+        assert!(std::fs::read_dir(&output)
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".oarlabel-crops-")));
         std::fs::remove_dir_all(dir).ok();
     }
 

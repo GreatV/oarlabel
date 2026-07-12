@@ -241,6 +241,17 @@ static TEXT_RECOGNITION: OnceLock<Mutex<HashMap<String, Arc<TextRecognitionPredi
 static LAYOUT: OnceLock<Mutex<HashMap<String, Arc<LayoutDetectionPredictor>>>> = OnceLock::new();
 static FORMULA: OnceLock<Mutex<HashMap<String, Arc<FormulaRecognitionPredictor>>>> =
     OnceLock::new();
+// Model construction is memory-intensive. Cache lookup remains concurrent,
+// but a cold miss is singleflight so parallel batch requests cannot build the
+// same (or multiple large) pipelines at the same time.
+static PIPELINE_BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn lock_pipeline_build() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    PIPELINE_BUILD_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|e| e.to_string())
+}
 
 fn ort_config_for(device: &str) -> Result<Option<OrtSessionConfig>, String> {
     let d = device.to_lowercase();
@@ -326,6 +337,15 @@ fn get_or_build_ocr(
         tracing::debug!(profile = %profile_key, device = %device, "reuse cached OCR pipeline");
         return Ok(existing.clone());
     }
+    let _build_guard = lock_pipeline_build()?;
+    if let Some(existing) = cell
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(existing);
+    }
 
     let det = resolve_model_path(app, &prof.det, "text detection model")?;
     let rec = resolve_predictor_asset_path(app, &prof.rec, "text recognition model")?;
@@ -394,6 +414,15 @@ fn get_or_build_text_recognition(
         );
         return Ok(existing.clone());
     }
+    let _build_guard = lock_pipeline_build()?;
+    if let Some(existing) = cell
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(existing);
+    }
 
     let rec = resolve_predictor_asset_path(app, &prof.rec, "text recognition model")?;
     let dict = resolve_predictor_asset_path(app, &prof.dict, "text recognition dictionary")?;
@@ -453,6 +482,15 @@ fn get_or_build_layout(
     {
         return Ok(existing.clone());
     }
+    let _build_guard = lock_pipeline_build()?;
+    if let Some(existing) = cell
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(existing);
+    }
 
     let model = resolve_model_path(app, layout_key, "layout detection model")?;
     let model_name = d
@@ -492,6 +530,15 @@ fn get_or_build_formula(
         .cloned()
     {
         return Ok(existing.clone());
+    }
+    let _build_guard = lock_pipeline_build()?;
+    if let Some(existing) = cell
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(existing);
     }
 
     let prof = models::formula_profile(app, formula_key)?;

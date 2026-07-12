@@ -119,7 +119,10 @@ export function Toolbar({ onOpen, onExport, dock, onDockChange }: ToolbarProps) 
       setMode: state.setMode,
       preannotateAll: state.preannotateAll,
       hasExistingAnnotations: state.images.some(
-        (image) => image.status !== "pending" || !!state.annotationErrors[image.path],
+        (image) =>
+          image.hasAnnotations === true ||
+          image.status !== "pending" ||
+          !!state.annotationErrors[image.path],
       ),
       preannotateCurrent: state.preannotateCurrent,
     })),
