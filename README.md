@@ -7,7 +7,7 @@ Built with [Tauri](https://github.com/tauri-apps/tauri),
 [oar-ocr](https://github.com/GreatV/oar-ocr).
 
 <p align="center">
-  <img src="docs/images/oarlabel-app-overview.png" alt="oarlabel app overview" width="70%" />
+  <img src="docs/images/oarlabel-app-overview.png" alt="oarlabel app overview" />
 </p>
 
 ## Features
